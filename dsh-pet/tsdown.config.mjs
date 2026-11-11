@@ -100,6 +100,8 @@ export default defineConfig([
       /^zod$/,
       /^openai$/,
       /^@anthropic-ai\/sdk$/,
+      // 语音合成：运行时才 import，但应用产物无 node_modules，必须内联（连它的 ws 一起）。
+      /^@andresaya\/edge-tts$/,
     ],
     external: ['electron', /^@electron\//, /^node:/, /^@deepseek-ai\/(?!dsh-home-paths$|dsh-credentials$|dsh-llm$)/],
     alias: {
@@ -107,5 +109,20 @@ export default defineConfig([
       '@deepseek-ai/dsh-credentials': shim('dsh-credentials'),
       '@deepseek-ai/dsh-llm': shim('dsh-llm'),
     },
+  },
+  {
+    ...shared,
+    // 独立模式设置页里的对话面板（lib/chat-panel.js）：跑在浏览器里，既没有 DSH 注入也没有
+    // node_modules，所以 react / react-dom 必须打进产物——这与 client 那份正好相反（那边由宿主提供）。
+    // platform 覆盖成 browser，否则 tsdown 会按 node 口径解析并留下 node: 内置依赖。
+    platform: 'browser',
+    target: 'es2020',
+    entry: {
+      'chat-panel': 'src/standalone/settings-page/chat-mount.ts',
+    },
+    noExternal: [/^react(\/|$)/, /^react-dom(\/|$)/],
+    external: [/^node:/],
+    // 与 client 同理：设置页刷新会重跑脚本，包一层 IIFE 免得顶层声明重复触发 SyntaxError。
+    outputOptions: { banner: ';(()=>{', footer: '})();' },
   },
 ]);

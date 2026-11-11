@@ -6,9 +6,10 @@
  * @module dsh-pet/src/client/settings
  */
 import { ROUTE_PATH } from '../shared/constants.ts';
+import { avatarUrl } from '../shared/avatar.ts';
 import { DEFAULT_FONT } from '../shared/fonts.ts';
 import { DEFAULT_PHYSICS } from '../shared/physics.ts';
-import type { FontConfig, ModelSelection, PhysicsParams } from '../shared/types.ts';
+import type { FontConfig, ModelSelection, PhysicsParams, Weights } from '../shared/types.ts';
 import type { FunctionComponent } from 'react';
 import { requestNotificationPermission } from './notify.ts';
 import { injectSettingsCss } from './settings/css.ts';
@@ -21,12 +22,14 @@ import { makeGlobalCard, type GlobalFlagKey, type GlobalFlags } from './settings
 import { makeLoadStatus } from './settings/load-status.ts';
 import { makeModelCard, type ChatFlagKey, type ChatFlagValues, type ModelFieldKey } from './settings/model-card.ts';
 import { makeMobileCard } from './settings/mobile-card.ts';
+import { makeMotionCard } from './settings/motion-card.ts';
 import { makeModelPicker } from './settings/picker/index.ts';
 import { makeVoicePicker } from './settings/picker/voice-picker.ts';
 import { runNotificationTest } from './settings/notify-test.ts';
 import { makeKindTabs } from './settings/kind-tabs.ts';
 import { makePathsCards } from './settings/paths-cards.ts';
 import { makePetCard } from './settings/pet-card.ts';
+import { uploadPetAvatar } from './settings/avatar-upload.ts';
 import { makePetTabs } from './settings/pet-tabs.ts';
 import { createWriteFlow } from './settings/config/index.ts';
 import { makePhysicsCard } from './settings/physics-card.ts';
@@ -39,6 +42,7 @@ import { usePetList } from './settings/use-pet-list.ts';
 import { useRemoteData } from './settings/use-remote-data.ts';
 import { makeUiKit } from './settings/ui.ts';
 import { makeVoiceCard, type VoiceOption } from './settings/voice-card.ts';
+import { DEFAULT_WEIGHTS } from '../shared/weights.ts';
 
 // 字典与桥的真源都在 settings/ 里：宿主的 locale 注册、容器与测试夹具都经这里取，不各自深路径引用。
 export { dicts, NS } from './settings/locales/index.ts';
@@ -76,6 +80,7 @@ export function makePetConfigSection(
   const FontCard = makeFontCard(rt);
   const ModelCard = makeModelCard(rt, ModelPicker);
   const PhysicsCard = makePhysicsCard(rt);
+  const MotionCard = makeMotionCard(rt);
   const ShortcutsCard = makeShortcutsCard(rt, ctx);
   const MobileCard = makeMobileCard(rt);
   const Actions = makeActions(rt);
@@ -150,15 +155,18 @@ export function makePetConfigSection(
     const [voiceName, setVoiceName] = useState('zh-CN-XiaoyiNeural');
     // 播放音量（全局系数 0–1）：初值 1 是内置默认（最大音量），加载后由成品值覆盖。
     const [voiceVolume, setVoiceVolume] = useState(1);
-    // 语音的两个细分开关（周期碎碎念 / 待办提醒）：与总开关同一套语义，初值 false 是内置默认。
+    // 另外三类语音开关（周期碎碎念 / 待办提醒 / 工作状态播报）：与语音播报平级，初值 false 是内置默认。
     const [voiceWhisperEnabled, setVoiceWhisperEnabled] = useState(false);
     const [voiceTodoEnabled, setVoiceTodoEnabled] = useState(false);
+    const [voiceNotifyEnabled, setVoiceNotifyEnabled] = useState(false);
     // 可选音色：来自宿主 /voice/voices，拉不到就留空——下拉只显示当前值，绝不硬编码音色 id。
     const [voiceOptions, setVoiceOptions] = useState<VoiceOption[]>([]);
     // 物理参数（全局）：只改本地状态，随「保存」整包写入；初值仅占位，成品加载成功后才允许编辑与保存。
     const [physics, setPhysics] = useState<PhysicsParams>({ ...DEFAULT_PHYSICS });
     // 字体（全局默认）：与 physics 同一套语义；初值仅占位，成品加载成功后才允许编辑与保存。
     const [font, setFont] = useState<FontConfig>({ ...DEFAULT_FONT });
+    // 动作频率权重（main 条目）：三项合计 ≤ 100，随机动作是余量；随「保存」整包写入。
+    const [weights, setWeights] = useState<Weights>({ ...DEFAULT_WEIGHTS });
     // AI 模型（条目级）：碎碎念 / 对话各自的服务商与模型，两者都留空 = 跟随当前对话；随「保存」整包写入。
     const [whisperModel, setWhisperModel] = useState<ModelSelection>({ provider: '', model: '' });
     const [chatModel, setChatModel] = useState<ModelSelection>({ provider: '', model: '' });
@@ -166,6 +174,10 @@ export function makePetConfigSection(
     const [chatMemory, setChatMemory] = useState(10);
     // 对话配图张数上限（全局默认）：初值 20 是内置默认，加载后由成品值覆盖。
     const [chatImageLimit, setChatImageLimit] = useState(20);
+    // 头像预览的破缓存版本号：上传成功后换一个，预览才会重新取图（同一 URL 会被浏览器记住）。
+    const [avatarVersion, setAvatarVersion] = useState(Date.now());
+    // 头像上传中：按钮禁用并换文案，与「保存」的 busy 分开——上传不写配置。
+    const [avatarBusy, setAvatarBusy] = useState(false);
 
     // 首次读取与恢复默认必须更新同一组控件，避免下一次保存回写过期值。
     const applyConfig = useCallback(
@@ -187,8 +199,10 @@ export function makePetConfigSection(
         if (patch.voiceVolume !== undefined) setVoiceVolume(patch.voiceVolume);
         if (patch.voiceWhisperEnabled !== undefined) setVoiceWhisperEnabled(patch.voiceWhisperEnabled);
         if (patch.voiceTodoEnabled !== undefined) setVoiceTodoEnabled(patch.voiceTodoEnabled);
+        if (patch.voiceNotifyEnabled !== undefined) setVoiceNotifyEnabled(patch.voiceNotifyEnabled);
         if (patch.physics !== undefined) setPhysics(patch.physics);
         if (patch.font !== undefined) setFont(patch.font);
+        if (patch.animationWeights !== undefined) setWeights(patch.animationWeights);
         if (patch.whisperModel !== undefined) setWhisperModel(patch.whisperModel);
         if (patch.chatModel !== undefined) setChatModel(patch.chatModel);
         if (patch.chatMemoryRounds !== undefined) setChatMemory(patch.chatMemoryRounds);
@@ -213,6 +227,33 @@ export function makePetConfigSection(
 
     // 当前选中的宠物对象（表单数据源）；selId 由 add/remove/sync 同步维护，列表非空时恒有效
     const cur = pets.find((p) => p.id === selId) ?? null;
+    // 头像只能属于 pet pack：main（含没有 assetRoot 的实例）用插件默认 logo，不给上传入口。
+    const avatarEditable = cur !== null && cur.assetRoot !== undefined && cur.assetRoot !== 'main';
+
+    /** 上传当前宠物的头像：直接落盘、不经过「保存」——头像不是配置字段，改完不必再点保存。
+     *  归属看素材根（文件宠物是目录前缀，同一素材根的多只实例共用一张）。 */
+    const uploadAvatar = (file: File): void => {
+      if (cur === null) return;
+      const assetRoot = cur.assetRoot ?? '';
+      setAvatarBusy(true);
+      void (async () => {
+        try {
+          const result = await uploadPetAvatar(assetRoot, file);
+          if (!result.ok) {
+            setMsg({ kind: 'err', text: result.message });
+            return;
+          }
+          // 换版本号让预览立刻重取，否则浏览器还拿缓存里的旧图。
+          setAvatarVersion(Date.now());
+          setMsg({ kind: 'ok', text: t('avatarUploaded') });
+        } catch (error) {
+          setMsg({ kind: 'err', text: error instanceof Error ? error.message : String(error) });
+        } finally {
+          setAvatarBusy(false);
+        }
+      })();
+    };
+
     // 文件宠物条目数：只用于标题提示「另 n 只来自 pet/ 目录」。
     const packCount = kinds.filter((item) => item.kind === 'pack').length;
 
@@ -271,12 +312,14 @@ export function makePetConfigSection(
         voiceVolume,
         voiceWhisperEnabled,
         voiceTodoEnabled,
+        voiceNotifyEnabled,
         physics,
         whisperModel,
         chatModel,
         chatMemoryRounds: chatMemory,
         chatImageLimit,
         font,
+        animationWeights: weights,
       }),
       busy: () => busy,
       setBusy,
@@ -336,6 +379,11 @@ export function makePetConfigSection(
           busy,
           msg,
           entryPrompt,
+          // 预览与聊天面板同一个地址：内置回默认 logo，所以无需区分「有没有头像」。
+          avatarSrc: avatarUrl(cur?.assetRoot ?? '', avatarVersion),
+          avatarBusy,
+          // 内置条目没有这个能力：不传 onAvatar，卡片就只渲染预览。
+          ...(avatarEditable ? { onAvatar: uploadAvatar } : {}),
           onChange: update,
           onSave: () => void write.save(),
           onRemove: requestRemove,
@@ -349,11 +397,13 @@ export function makePetConfigSection(
           voices: voiceOptions,
           whisperEnabled: voiceWhisperEnabled,
           todoEnabled: voiceTodoEnabled,
+          notifyEnabled: voiceNotifyEnabled,
           onToggle: setVoiceEnabled,
           onVoiceChange: setVoiceName,
           onVolumeChange: setVoiceVolume,
           onWhisperToggle: setVoiceWhisperEnabled,
           onTodoToggle: setVoiceTodoEnabled,
+          onNotifyToggle: setVoiceNotifyEnabled,
         }),
         h(FontCard, { busy, font, onChange: patchFont }),
         h(ModelCard, {
@@ -371,6 +421,7 @@ export function makePetConfigSection(
           onFlagChange: setChatFlag,
         }),
         h(PhysicsCard, { busy, physics, onChange: patchPhysics }),
+        h(MotionCard, { busy, weights, onChange: setWeights }),
         h(MobileCard, { busy, physics, onChange: patchPhysics }),
         h(Actions, {
           busy,

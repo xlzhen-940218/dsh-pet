@@ -2,19 +2,15 @@
  * Electron 定位与下载：找已安装的二进制，缺失时按需下载并解压。
  *
  * 不负责启动进程（归 ./child）；下载失败记日志后返回 undefined，由调用方降级为仅浏览器模式。
- * 必须始终成立：解析结果必须落在包内或用户数据目录，不接受任意路径。
+ * 必须始终成立：解析结果只来自显式候选、DSH_PET_ELECTRON_PATH 与 $DSH_HOME/electron；
+ * 不借用宿主安装目录里的 electron npm 包（#297：那是 pnpm 重排依赖时要替换的目录）。
  * @module dsh-pet/src/host/helper/electron
  */
-import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { type LoggerLike } from '../log-file.ts';
 import { PACKAGE_ROOT } from '../paths.ts';
 import type { HelperOptions } from './child.ts';
-
-// `@electron/get` 只在真要下载 Electron 时才用到，故按需动态加载（见 ensureElectronDownload）：
-// 静态 import 会把它连同 got/fs-extra 一串依赖钉进每个产物的启动路径，而独立应用模式下这条路径不执行。
-const require = createRequire(import.meta.url);
 
 /** 包根：与宿主其它模块共用同一个锚点（见 ../paths.ts），不得按本文件目录另算一份。 */
 export const packageRoot = PACKAGE_ROOT;
@@ -25,16 +21,41 @@ export const defaultHelperMain = resolve(packageRoot, 'runtime', 'electron-helpe
 /** 桌面 Helper 的远程调试端口：0 = 不开。排障时本地改成 9222，重启 Helper 后用 chrome://inspect 连。 */
 export const DESKTOP_DEBUG_PORT = 0;
 
+/** 强制 XWayland 的 Chromium 开关：Wayland 原生下小窗的定位/置顶/穿透都不可用。 */
+const OZONE_X11_SWITCH = '--ozone-platform=x11';
+
+/**
+ * Linux Wayland 会话是否应强制走 XWayland。
+ *
+ * 只在有 XWayland（`DISPLAY` 存在）时可强制；纯 Wayland 只能提示用户切 X11 会话。
+ * @param env - 读取显示环境变量；默认进程环境。
+ * @param platform - 运行平台；默认 `process.platform`。
+ * @returns 需要且能够强制 XWayland 时为 true。
+ */
+export function shouldForceXWayland(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return platform === 'linux' && Boolean(env.WAYLAND_DISPLAY) && Boolean(env.DISPLAY);
+}
+
 /**
  * 桌面 Helper 的启动参数。
  *
+ * 开关必须排在 Helper 入口脚本之前：Electron 把脚本路径之后的参数当作应用参数。
  * @param helperPath - Helper 入口脚本的绝对路径。
- * @param debugPort - 远程调试端口；0 表示不挂 Chromium 的调试开关。
+ * @param options - `debugPort` 远程调试端口（0 关闭）；`forceX11` 是否加 `--ozone-platform=x11`。
  * @returns 可直接交给 spawn 的参数数组。
  */
-export function helperLaunchArgs(helperPath: string, debugPort = DESKTOP_DEBUG_PORT): string[] {
-  // 开关排在脚本路径之前：与 Electron 文档的启动写法一致，不会被当成业务参数。
-  return debugPort > 0 ? ['--remote-debugging-port=' + debugPort, helperPath] : [helperPath];
+export function helperLaunchArgs(
+  helperPath: string,
+  options: { debugPort?: number; forceX11?: boolean } = {},
+): string[] {
+  const debugPort = options.debugPort ?? DESKTOP_DEBUG_PORT;
+  const switches: string[] = [];
+  if (options.forceX11 === true) switches.push(OZONE_X11_SWITCH);
+  if (debugPort > 0) switches.push('--remote-debugging-port=' + debugPort);
+  return [...switches, helperPath];
 }
 
 /** 只做基本文件校验：不验证二进制格式，也不实际启动候选。 */
@@ -48,9 +69,10 @@ function isNonEmptyFile(path: string): boolean {
 }
 
 /**
- * 解析 Electron 可执行文件，按优先级取第一个存在且非空的候选：显式候选与 DSH_PET_ELECTRON_PATH
- * → 本机 electron npm 包 → $DSH_HOME/electron（下载落地路径）。
- * 只认自己的落地路径，不再去 npm 全局目录 / Program Files / /usr/bin 探测别人装的 Electron。
+ * 解析 Electron 可执行文件，按优先级取第一个存在且非空的候选：显式候选 → DSH_PET_ELECTRON_PATH
+ * → $DSH_HOME/electron（下载落地路径）。
+ * 只认自己的落地路径：不探测 npm 全局目录 / Program Files / /usr/bin，也不借用宿主安装目录里的
+ * electron npm 包——运行中的 Helper 会锁住它，pnpm 重排依赖时无法整体替换（#297）。
  * 都不存在时由 ensureElectronDownload() 在进程内异步下载（不 spawn 子进程，避免 process.execPath
  * 在 Electron 宿主里指向宿主 exe 而崩溃）。
  */
@@ -64,14 +86,6 @@ export function resolveElectronPath(candidates: Array<string | undefined> = []):
   };
   for (const value of candidates) push(value);
   if (process.env.DSH_PET_ELECTRON_PATH) push(process.env.DSH_PET_ELECTRON_PATH);
-  try {
-    const resolved = require('electron');
-    if (typeof resolved === 'string' && resolved) push(resolved);
-  } catch {
-    /* electron 未安装时跳过 */
-  }
-  // 只认自己的落地路径（ensureElectronDownload 下载解压到 $DSH_HOME/electron）；
-  // 不再去 npm 全局目录 / Program Files / /usr/bin 等别处探测别人装的 Electron。
   push(defaultElectronExe());
   return list.find(isNonEmptyFile);
 }
@@ -215,7 +229,8 @@ export async function ensureElectronDownload(options: EnsureElectronOptions = {}
     timer.unref?.();
     let nextLogAt = Date.now() + 3000;
     try {
-      // 按需加载（见文件头的 import 注释）：只有走到「确实要下载」这一步才会解析这个包
+      // 按需加载：静态 import 会把它连同 got/fs-extra 一串依赖钉进每个产物的启动路径，
+      // 而独立应用模式下这条路径不执行。
       const { downloadArtifact } = await import('@electron/get');
       const zipPath = await downloadArtifact({
         version: `v${version}`,
@@ -272,5 +287,5 @@ export function defaultLaunch(options: HelperOptions = {}): { command: string; a
     throw new Error('dsh-pet: cannot resolve Electron executable. Set DSH_PET_ELECTRON_PATH or install electron.');
   }
   const helperPath = options.helperPath || defaultHelperMain;
-  return { command: electronPath, args: helperLaunchArgs(helperPath) };
+  return { command: electronPath, args: helperLaunchArgs(helperPath, { forceX11: shouldForceXWayland() }) };
 }

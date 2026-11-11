@@ -42,13 +42,14 @@ export function apply(ctx: any): void {
     thumbUserRoot,
     memeDirsFor,
     standaloneAiPolicy,
+    standaloneAiBalance,
     state,
     playback,
     workStatus,
     EXTERNAL_WORK_SESSION,
     nextExternalWorkSeq,
   } = setup;
-  const workStatusBridge = createWorkStatusBridge({ state, workStatus });
+  const workStatusBridge = createWorkStatusBridge({ state, workStatus, EXTERNAL_WORK_SESSION });
   const { publishWorkStatus, stopWorkStatusFlush } = workStatusBridge;
   const downloadReport = createDownloadReport({
     EXTERNAL_WORK_SESSION,
@@ -75,7 +76,7 @@ export function apply(ctx: any): void {
   const chatMemory = createChatMemory({ ctx, configPaths, log, memeDirsFor, playback, state, userRoot });
   const { lastWhisperAt, publishWhisper, publishSleepTalk, chatWithPet, getActivePetId, setActivePetId } = chatMemory;
 
-  const balancePoll = createBalancePoll({ ctx, configPaths, getActivePetId, log, state });
+  const balancePoll = createBalancePoll({ ctx, configPaths, getActivePetId, log, state, standaloneAiBalance });
   const { effectivePetList, balancePeriodSec, whisperPeriodSec, refreshBalance, resolveActivePetId, petDisplayName } =
     balancePoll;
 

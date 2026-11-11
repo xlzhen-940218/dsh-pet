@@ -12,6 +12,9 @@ export const FEET_Y = 330;
 export const HIT_BOX = { x0: 200, y0: 50, x1: 440, y1: 335 };
 /** 拖拽判定阈值（px）。 */
 export const DRAG_THRESHOLD = 5;
+/** 越界摆放的可见下限（px）：命中区至少留这么多在可视区内，右键才点得到。
+ *  网页端由 clampReachableBox 在提交位置时夹取，桌面端由窗口落位按同一条规则留边界。 */
+export const MIN_REACHABLE_PX = 24;
 /** 弹弓窗口（ms）：两次按下之间的间隔小于它即按弹弓算，与这次拖了多久、何时松手无关。
  *  只认左键，没有待拉状态（换算见 physics.ts）。 */
 export const SLINGSHOT_DOUBLE_MS = 200;
@@ -60,6 +63,13 @@ export function routePathOf(baseURI: string | undefined): string {
  * 无 `document` 的三处（宿主、桌面 Helper 的主进程侧、独立模式）取到的是纯路由段。
  */
 export const ROUTE_PATH = routePathOf(typeof document === 'undefined' ? undefined : document.baseURI);
+
+/**
+ * 是否给视频挂 1/255 alpha 修正滤镜。开着能去掉 WebM 背景那层淡灰矩形，但会掉帧：滤镜每帧
+ * 按视频尺寸重算，桌宠越大越明显，动起来会卡顿。灰框只在多只宠物重叠时才看得出来，单只基本
+ * 没差别，所以默认关闭。
+ */
+export const PET_ALPHA_FIX_ENABLED = false;
 
 /** 播放动画扩展名（集中开关）：默认 .webm（VP9-alpha）两端可直接透明播放；
  *  macOS 的 Safari/WKWebView 不认 webm alpha（渲染黑底），需改为 .mov（HEVC-with-Alpha）——

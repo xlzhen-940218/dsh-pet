@@ -9,7 +9,9 @@
 import type { RouteResult } from '../http.ts';
 import { handleAssetsRoutes } from './assets.ts';
 import { handleAttachmentRoutes } from './attachment.ts';
+import { handleAvatarRoutes } from './avatar.ts';
 import { handleBalanceRoutes } from './balance.ts';
+import { handleCharacterRoutes } from './character.ts';
 import { handleChatRoutes } from './chat.ts';
 import { handleConfigRoutes } from './config/index.ts';
 import { handleDesktopRoutes } from './desktop.ts';
@@ -17,6 +19,7 @@ import { handleInteractionRoutes } from './interaction.ts';
 import { handleMenuRoutes } from './menu.ts';
 import { handleMotionRoutes } from './motion.ts';
 import { handlePlaybackRoutes } from './playback.ts';
+import { handleSessionRoutes } from './session.ts';
 import { handleStateRoutes } from './state.ts';
 import { handleSleepRoutes } from './sleep.ts';
 import { handleTodoRoutes } from './todos.ts';
@@ -29,6 +32,7 @@ const HANDLERS: readonly RouteHandler[] = [
   handleDesktopRoutes,
   handleMenuRoutes,
   handleStateRoutes,
+  handleSessionRoutes,
   handleBalanceRoutes,
   handleInteractionRoutes,
   handleMotionRoutes,
@@ -38,6 +42,8 @@ const HANDLERS: readonly RouteHandler[] = [
   handleAttachmentRoutes,
   handleTodoRoutes,
   handleVoiceRoutes,
+  handleAvatarRoutes,
+  handleCharacterRoutes,
   handleAssetsRoutes,
 ];
 

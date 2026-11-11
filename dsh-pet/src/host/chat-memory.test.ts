@@ -2,13 +2,14 @@
  * 对话记忆写入的单元测试 —— 钉住「聊天记录存档」的两类图信息：
  * 带图那一轮 user 消息记下附件引用、配图那一轮 assistant 消息记下表情包名；
  * 不带图那一轮两条消息的字段集合必须与加字段前完全一致（纯增量，不破坏旧格式）。
+ * 另覆盖第三方记忆提供者的接线：召回注入、失败降级、接收参数与抛错隔离。
  *
  * 走真实 memory.json 落盘（临时目录隔离），默认配置取仓库内 assets/config.jsonc（与生产同一份，
  * 不手抄第二份）；LLM 用假流驱动、不联网。
  *
  * 跑法：node --experimental-strip-types --test src/host/chat-memory.test.ts
  */
-import { test, describe } from 'node:test';
+import { beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -19,6 +20,7 @@ import { createChatMemory, type ChatMemoryInput } from './plugin/chat-memory.ts'
 import type { ChatMemoryMessage } from './chat.ts';
 import type { ConfigPaths } from './config.ts';
 import type { PetImageRef } from './image-attachment.ts';
+import { registerChatMemoryProvider, resetChatMemoryProviders } from './chat-memory-provider.ts';
 
 /** 一条已落盘的图片引用：字段与附件服务返回的一致。 */
 const IMAGE: PetImageRef = {
@@ -156,8 +158,12 @@ describe('createChatMemory —— 图信息写入记忆文件', () => {
 
 describe('createChatMemory —— 指定配图的碎碎念', () => {
   /** 池里两张图、文件都在；自动配图开关关着，用来验证「点名不受自动开关门控」。 */
-  function poolWorkspace() {
-    const ws = tempWorkspace({ whisperImageEnabled: false, memes: { 可爱: '卖萌立绘', 生气: '鼓腮帮子' } });
+  function poolWorkspace(overlay: Record<string, unknown> = {}) {
+    const ws = tempWorkspace({
+      whisperImageEnabled: false,
+      memes: { 可爱: '卖萌立绘', 生气: '鼓腮帮子' },
+      ...overlay,
+    });
     mkdirSync(ws.memeDir, { recursive: true });
     writeFileSync(join(ws.memeDir, '可爱.png'), '');
     writeFileSync(join(ws.memeDir, '生气.png'), '');
@@ -213,7 +219,7 @@ describe('createChatMemory —— 指定配图的碎碎念', () => {
   });
 
   test('voiceTo：传了就用传的，没传按 display 推导（默认宠物 display=both → desktop）', async () => {
-    const ws = poolWorkspace();
+    const ws = poolWorkspace({ voiceEnabled: true });
     const records: Array<{ petId: string; leaf: string; data: Record<string, unknown> }> = [];
     try {
       await createMemory('随便一句', ws, ws.memeDir, { records }).publishWhisper('main', undefined, 'web');
@@ -225,8 +231,8 @@ describe('createChatMemory —— 指定配图的碎碎念', () => {
       rmSync(ws.dir, { recursive: true, force: true });
     }
   });
-  test('kind=whisper 受 voiceWhisperEnabled 管；手动（缺省 kind）不受它管', async () => {
-    const off = poolWorkspace();
+  test('四类语音各由自己的开关决定：周期碎碎念看 voiceWhisperEnabled，手动触发看 voiceEnabled', async () => {
+    const off = tempWorkspace();
     const offRecords: Array<{ petId: string; leaf: string; data: Record<string, unknown> }> = [];
     try {
       await createMemory('一句', off, off.memeDir, { records: offRecords }).publishWhisper(
@@ -238,12 +244,12 @@ describe('createChatMemory —— 指定配图的碎碎念', () => {
       assert.equal('voiceTo' in (offRecords[0]?.data ?? {}), false, '开关关着时周期碎碎念不该写 voiceTo');
 
       await createMemory('一句', off, off.memeDir, { records: offRecords }).publishWhisper('main');
-      assert.equal(offRecords[1]?.data.voiceTo, 'desktop', '手动触发不看那个开关，照常按 display 推导');
+      assert.equal('voiceTo' in (offRecords[1]?.data ?? {}), false, '手动播报开关关着时手动触发也不该写 voiceTo');
     } finally {
       rmSync(off.dir, { recursive: true, force: true });
     }
 
-    const on = tempWorkspace({ voiceWhisperEnabled: true });
+    const on = tempWorkspace({ voiceWhisperEnabled: true, voiceEnabled: true });
     const onRecords: Array<{ petId: string; leaf: string; data: Record<string, unknown> }> = [];
     try {
       await createMemory('一句', on, undefined, { records: onRecords }).publishWhisper(
@@ -253,6 +259,9 @@ describe('createChatMemory —— 指定配图的碎碎念', () => {
         'whisper',
       );
       assert.equal(onRecords[0]?.data.voiceTo, 'desktop', '开关打开后周期碎碎念照常带 voiceTo');
+
+      await createMemory('一句', on, undefined, { records: onRecords }).publishWhisper('main');
+      assert.equal(onRecords[1]?.data.voiceTo, 'desktop', '开关打开后手动触发照常带 voiceTo');
     } finally {
       rmSync(on.dir, { recursive: true, force: true });
     }
@@ -261,12 +270,25 @@ describe('createChatMemory —— 指定配图的碎碎念', () => {
 
 describe('createChatMemory —— 对话回复的 voiceTo', () => {
   test('回复写叶子时带上该由哪一端念（对话请求没有具体端，按 display 推导）', async () => {
-    const ws = tempWorkspace();
+    const ws = tempWorkspace({ voiceEnabled: true });
     const records: Array<{ petId: string; leaf: string; data: Record<string, unknown> }> = [];
     try {
       const r = await createMemory('在的', ws, undefined, { records }).chatWithPet('main', '在吗');
       assert.equal(r.ok, true);
       assert.equal(records[0]?.data.voiceTo, 'desktop', '默认宠物 display=both，桌面优先');
+    } finally {
+      rmSync(ws.dir, { recursive: true, force: true });
+    }
+  });
+
+  test('手动播报开关关着：回复照样写气泡，叶子不带 voiceTo', async () => {
+    const ws = tempWorkspace();
+    const records: Array<{ petId: string; leaf: string; data: Record<string, unknown> }> = [];
+    try {
+      const r = await createMemory('在的', ws, undefined, { records }).chatWithPet('main', '在吗');
+      assert.equal(r.ok, true);
+      assert.equal(records[0]?.leaf, 'say', '气泡照弹');
+      assert.equal('voiceTo' in (records[0]?.data ?? {}), false, '关着时不该写这个键');
     } finally {
       rmSync(ws.dir, { recursive: true, force: true });
     }
@@ -451,6 +473,114 @@ describe('createChatMemory —— 删除对话记忆', () => {
       const r = await createMemory('无关', ws).deleteHistory('nobody');
       assert.equal(r.ok, false);
       assert.equal(r.ok === false ? r.reason : '', 'unknown-pet');
+    } finally {
+      rmSync(ws.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('createChatMemory —— 第三方记忆提供者', () => {
+  beforeEach(() => resetChatMemoryProviders());
+
+  test('未注册：请求与本轮输入不变（没有证据块）', async () => {
+    const ws = tempWorkspace({ chatImageEnabled: false, chatAnimationEnabled: false });
+    const captured: Record<string, unknown>[] = [];
+    try {
+      await createMemory('在的', ws, undefined, undefined, captured).chatWithPet('main', '在吗');
+      const messages = captured[0]?.messages as Array<{ content: Array<{ type: string; text?: string }> }>;
+      const last = messages[messages.length - 1];
+      assert.equal(last?.content.length, 1, '没有召回时本轮只有一个 text 块');
+      assert.equal(last?.content[0]?.text, '在吗');
+    } finally {
+      rmSync(ws.dir, { recursive: true, force: true });
+    }
+  });
+
+  test('召回：补丁覆盖 system 与 userText，核心用改后的内容生成', async () => {
+    registerChatMemoryProvider({
+      id: 'pc',
+      recall: async () => ({ system: '改后的人设', userText: '改后的问题' }),
+    });
+    const ws = tempWorkspace({ chatImageEnabled: false, chatAnimationEnabled: false });
+    const captured: Record<string, unknown>[] = [];
+    try {
+      await createMemory('记住啦', ws, undefined, undefined, captured).chatWithPet('main', '在吗');
+      assert.equal(captured[0]?.system, '改后的人设');
+      assert.equal(userTextOf(captured[0]), '改后的问题');
+    } finally {
+      rmSync(ws.dir, { recursive: true, force: true });
+    }
+  });
+
+  test('召回抛错：回复照常，内容不修改', async () => {
+    registerChatMemoryProvider({
+      id: 'pc',
+      recall: async () => {
+        throw new Error('服务不可用');
+      },
+    });
+    const ws = tempWorkspace({ chatImageEnabled: false, chatAnimationEnabled: false });
+    const captured: Record<string, unknown>[] = [];
+    try {
+      const r = await createMemory('在的', ws, undefined, undefined, captured).chatWithPet('main', '在吗');
+      assert.equal(r.ok, true);
+      assert.equal(userTextOf(captured[0]), '在吗');
+    } finally {
+      rmSync(ws.dir, { recursive: true, force: true });
+    }
+  });
+
+  test('召回超时：1.5s 后按不修改继续，回复照常', async () => {
+    registerChatMemoryProvider({ id: 'pc', recall: () => new Promise<undefined>(() => {}) });
+    const ws = tempWorkspace({ chatImageEnabled: false, chatAnimationEnabled: false });
+    const captured: Record<string, unknown>[] = [];
+    try {
+      const r = await createMemory('在的', ws, undefined, undefined, captured).chatWithPet('main', '在吗');
+      assert.equal(r.ok, true);
+      assert.equal(userTextOf(captured[0]), '在吗');
+    } finally {
+      rmSync(ws.dir, { recursive: true, force: true });
+    }
+  });
+
+  test('接收：落盘后收到本轮问答与 ts，且不含未出现的可选字段', async () => {
+    const captured: Array<Record<string, unknown>> = [];
+    registerChatMemoryProvider({
+      id: 'pc',
+      capture: (input) => {
+        captured.push(input as unknown as Record<string, unknown>);
+      },
+    });
+    const ws = tempWorkspace();
+    try {
+      const r = await createMemory('你好呀～', ws).chatWithPet('main', '你好');
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(r.ok, true);
+      assert.equal(captured.length, 1);
+      const input = captured[0]!;
+      assert.equal(input.petId, 'main');
+      assert.equal(input.userText, '你好');
+      assert.equal(input.replyText, '你好呀～');
+      assert.equal(typeof input.ts, 'number');
+      assert.equal('action' in input, false);
+      assert.equal('image' in input, false);
+    } finally {
+      rmSync(ws.dir, { recursive: true, force: true });
+    }
+  });
+
+  test('接收抛错：不影响回复，也不影响已落盘的记忆', async () => {
+    registerChatMemoryProvider({
+      id: 'pc',
+      capture: () => {
+        throw new Error('上传失败');
+      },
+    });
+    const ws = tempWorkspace();
+    try {
+      const r = await createMemory('在的', ws).chatWithPet('main', '在吗');
+      assert.equal(r.ok, true);
+      assert.equal(readMessages(ws.userRoot).length, 2);
     } finally {
       rmSync(ws.dir, { recursive: true, force: true });
     }

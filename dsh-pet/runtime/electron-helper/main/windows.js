@@ -7,7 +7,7 @@
  * @module dsh-pet/runtime/electron-helper/main/windows
  */
 const path = require('node:path');
-const { pointerZone, decideWindowIgnore } = require('../pointer-target.js');
+const { pointerZone, decideWindowIgnore, leavesBody } = require('../pointer-target.js');
 const { TOPMOST_WATCHDOG_ENABLED, TOPMOST_WATCHDOG_TICK_MS } = require('../topmost-watchdog.js');
 const { TASKBAR_WATCHDOG_TICK_MS, shouldRunTaskbarWatchdog } = require('../taskbar-watchdog.js');
 
@@ -56,13 +56,22 @@ function createWindows({
   const inputRegions = new Map();
   /** 每窗口「光标停在余量区且非 busy」的连续时长（ms）：到点由兜底通道强制恢复穿透 */
   const offBodyMs = new Map();
+  /** 每窗口上一拍的光标分区：识别「刚离开身体」，据此向渲染端补发收起悬浮提示的通知 */
+  const lastPointerZone = new Map();
   /** 宠物间碰撞 broker 状态：petId -> { x, y, vx, vy, size, bottomPad } */
   const petStates = new Map();
   /** 冒烟期间暂停兜底泵：它按真实光标翻转，会干扰冒烟对渲染端通道的断言 */
   let pointerFallbackPaused = false;
 
+  /** 碰撞站场最多每 16ms 广播一次，位置仍由 IPC 逐帧立即提交。 */
+  let petStateTimer = null;
+
   /** 把当前全量宠物状态广播给所有窗口（碰撞检测的共享站场）。 */
   function broadcastPetStates() {
+    if (petStateTimer !== null) {
+      clearTimeout(petStateTimer);
+      petStateTimer = null;
+    }
     const states = {};
     for (const [pid, s] of petStates) {
       states[pid] = { x: s.x, y: s.y, vx: s.vx, vy: s.vy, size: s.size, bottomPad: s.bottomPad };
@@ -75,8 +84,13 @@ function createWindows({
   /** 记录/更新一只宠物的状态并广播。 */
   function updatePetState(petId, partial) {
     const prev = petStates.get(petId) || { x: 0, y: 0, vx: 0, vy: 0, size: 0, bottomPad: 0 };
-    petStates.set(petId, Object.assign({}, prev, partial));
-    broadcastPetStates();
+    const next = Object.assign({}, prev, partial);
+    if (petStates.has(petId) && Object.keys(next).every((key) => Object.is(next[key], prev[key]))) return;
+    petStates.set(petId, next);
+    // 单窗没有碰撞对象；多窗合并同一时间段内的更新，定时回调读取最新状态，保留最后一帧。
+    if (windows.size < 2 || petStateTimer !== null) return;
+    petStateTimer = setTimeout(broadcastPetStates, 16);
+    petStateTimer.unref?.();
   }
 
   /** 翻转整窗穿透的唯一出口：状态与镜像永远一起更新（穿透期间保留 forward）。 */
@@ -157,6 +171,11 @@ function createWindows({
       const point = dpi.currentPointer();
       const margin = winMargins.get(win.id);
       const zone = pointerZone(bounds, point, margin);
+      // 提示只在渲染端的 mousemove 里收起；宠物自己走开或窗口被别的窗口接走时没有 mousemove，
+      // 由这一拍补发通知。busy（拖拽/菜单/弹窗）期间提示本就不该显示，不发，免得松手瞬间误收。
+      const prevZone = lastPointerZone.get(win.id);
+      lastPointerZone.set(win.id, zone);
+      if (!busy && leavesBody(prevZone, zone)) win.webContents.send('pet:pointer-left');
       const nextMs = !busy && zone === 'margin' ? (offBodyMs.get(win.id) ?? 0) + POINTER_POLL_MS : 0;
       offBodyMs.set(win.id, nextMs);
       const next = decideWindowIgnore(bounds, point, ignoring, busy, nextMs, inputRegions.get(win.id), margin);
@@ -247,12 +266,15 @@ function createWindows({
       stopPointerFallback();
       stopTopmostWatchdog();
       windows.delete(pet.id);
+      petStates.delete(pet.id);
+      broadcastPetStates();
       lastRequestedBounds.delete(win.id);
       winMargins.delete(win.id);
       windowIgnore.delete(win.id);
       inputBusy.delete(win.id);
       inputRegions.delete(win.id);
       offBodyMs.delete(win.id);
+      lastPointerZone.delete(win.id);
     });
     win.loadFile(path.join(helperDir, 'index.html'), { query: windowQuery(pet, geo, scale) }).catch((error) => {
       console.error(`[dsh-pet-desktop-helper] page load failed (${pet.id}):`, error);
@@ -278,6 +300,9 @@ function createWindows({
       topInsetRatio: String(geo.topInsetRatio),
       panels: JSON.stringify(geo.panels),
       primaryIndex: String(geo.primaryIndex),
+      // X11 的窗口管理器把普通窗口钳在工作区内，窗口探不出屏幕；Windows / macOS 没这个限制。
+      // 渲染端据此决定要不要把钳掉的量转成本体在窗口内的偏移（见 fitWindow）。
+      isWindowClampedToWorkArea: process.platform === 'linux' ? '1' : '0',
     };
   }
 
@@ -305,6 +330,11 @@ function createWindows({
       }
     }
     windows.clear();
+    petStates.clear();
+    if (petStateTimer !== null) {
+      clearTimeout(petStateTimer);
+      petStateTimer = null;
+    }
   }
 
   return {

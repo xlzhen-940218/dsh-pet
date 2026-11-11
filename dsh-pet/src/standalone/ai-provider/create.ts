@@ -9,6 +9,8 @@ import { type StandaloneLogger } from '../context.ts';
 import { createAiConfig, type StandaloneAiPublicSettings } from '../ai-config.ts';
 import type { AiRuntime, AiStore, StandaloneAiDependencies, StandaloneAiService } from './types.ts';
 import { PROVIDER } from './limits.ts';
+import { discoverModels } from './list-models.ts';
+import { queryStandaloneBalance } from './balance.ts';
 import { createTextStream } from './stream.ts';
 import { testAiConnection } from './test-connection.ts';
 
@@ -59,18 +61,15 @@ export function createStandaloneAi(
     store,
     logger,
     fetcher: dependencies.fetch ?? globalThis.fetch.bind(globalThis),
-    now: dependencies.now ?? Date.now,
     disposed: false,
     paused: false,
     saving: false,
-    requests: [],
     active: undefined,
     ready(): boolean {
       return (
         !runtime.disposed &&
         !runtime.paused &&
         !runtime.saving &&
-        store.current().enabled &&
         !!store.current().model &&
         !!store.current().baseUrl &&
         !!store.current().apiKey
@@ -92,10 +91,19 @@ export function createStandaloneAi(
     getSettings: () => store.publicSettings(),
     saveSettings: (input) => saveSettings(runtime, store, input),
     isReady: () => runtime.ready(),
+    balanceAuth: () => ({ provider: store.current().balanceProvider, apiKey: store.current().apiKey }),
     testConnection: (input) =>
       runtime.disposed
         ? Promise.resolve({ ok: false, message: '服务已关闭' })
         : testAiConnection(runtime.fetcher, store.current(), input),
+    discoverModels: (input) =>
+      runtime.disposed
+        ? Promise.resolve({ ok: false, code: 'input', message: '服务已关闭' })
+        : discoverModels(runtime.fetcher, store.current(), input),
+    queryBalance: async () =>
+      runtime.disposed
+        ? { ok: false, provider: '', reason: 'unsupported' }
+        : queryStandaloneBalance(store.current().balanceProvider, store.current().apiKey),
     dispose() {
       runtime.disposed = true;
       runtime.active?.abort();

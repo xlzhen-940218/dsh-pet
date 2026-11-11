@@ -9,7 +9,7 @@ import { mkdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { BRIDGE_PREFIX } from './bridge.ts';
 import type { BridgeHandler, BridgeRequest, BridgeResponse } from './bridge.ts';
-import { defaultHelperMain, defaultLaunch, dshHomeDir, readElectronVersion } from './electron.ts';
+import { defaultHelperMain, defaultLaunch, dshHomeDir, readElectronVersion, shouldForceXWayland } from './electron.ts';
 import {
   HELPER_STABLE_MS,
   HELPER_STOP_TIMEOUT_MS,
@@ -19,6 +19,7 @@ import {
   crashLoopAdvice,
   describeExit,
   envPositiveInt,
+  helperOutputIsMeaningful,
   helperRunIsStable,
   restartBackoffDelayMs,
   shouldCircuitBreak,
@@ -100,7 +101,7 @@ export class HelperProcess {
   declare private launchIdentity: string;
   /** 是否已经因为「沙箱初始化失败」改用过 `--no-sandbox`（只退一次） */
   declare private hasSandboxFallbackApplied: boolean;
-  /** 当前子进程有没有写过 stdout/stderr：有输出说明 JS 已经跑过，秒退就不能赖沙箱 */
+  /** 当前子进程有没有写过非空白 stdout/stderr：有输出说明 JS 已经跑过，秒退就不能赖沙箱 */
   declare private hasChildOutput: boolean;
 
   constructor(options: HelperOptions = {}, logger: Logger = console) {
@@ -130,6 +131,14 @@ export class HelperProcess {
       sandboxFallback: this.hasSandboxFallbackApplied,
       customCommand: Boolean(this.options.command),
     });
+    // Wayland 原生下窗口无法定位/置顶/穿透，只有 XWayland 能救；纯 Wayland 时明说不可用，别让用户猜。
+    if (!this.options.command && shouldForceXWayland()) {
+      this.logger.info?.('dsh-pet desktop helper: Wayland 会话，强制 XWayland（--ozone-platform=x11）');
+    } else if (!this.options.command && process.platform === 'linux' && process.env.WAYLAND_DISPLAY) {
+      this.logger.warn?.(
+        'dsh-pet desktop helper: 纯 Wayland 无 XWayland，桌面模式的定位/置顶/穿透不可用；请改用 X11 会话',
+      );
+    }
     this.hasChildOutput = false;
     // 版本只在这里读一次：崩溃时退出码能说明「怎么死的」，说明不了「死的哪个版本」，而那才是排障入口
     this.launchIdentity = electronIdentity(command);
@@ -183,12 +192,15 @@ export class HelperProcess {
       }
     });
     child.stdout.on('data', (chunk) => {
-      this.hasChildOutput = true;
-      this.onStdoutChunk(String(chunk));
+      // Electron 在低完整性环境 abort 前会往 stdout 写 2 字节 \r\n：空白不算「JS 已跑过」，
+      // 否则 #286 的沙箱兜底会被这 2 字节永久挡住。
+      const text = String(chunk);
+      if (helperOutputIsMeaningful(text)) this.hasChildOutput = true;
+      this.onStdoutChunk(text);
     });
     child.stderr.on('data', (chunk) => {
       const line = String(chunk).trim();
-      if (line) {
+      if (helperOutputIsMeaningful(line)) {
         this.hasChildOutput = true;
         this.logger.warn?.(`[dsh-pet desktop helper] ${line}`);
       }

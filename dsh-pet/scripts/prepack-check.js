@@ -84,6 +84,7 @@ const required = [
   'runtime/electron-helper/sprite/motion.js', // 桌面模式运动驱动（同上）
   'runtime/electron-helper/sprite/input.js', // 桌面模式指针与命中（同上）
   'runtime/electron-helper/sprite/init.js', // 桌面模式构建期初始化（同上）
+  'runtime/electron-helper/sprite/window-fit.js', // 桌面模式窗口落位与钳制补偿（sprite.js 的原型扩展，须在其后加载）
   'runtime/electron-helper/shared-core.js', // 桌面模式共享纯逻辑（src/shared 构建产物，window.PetShared）
   'runtime/electron-helper/index.html', // 桌面模式页面壳
 ];
@@ -149,6 +150,12 @@ try {
 } catch (e) {
   console.log(`[prepack-check] note: 跳过 memes 键对齐核对（config.jsonc 解析失败：${e.message}）`);
 }
+
+// 角色参考图：/character 的包内兜底只读这张图，漏发则第三方拿不到任何官方参考图。
+// 与 memes 同一类问题——prepare.js 的白名单才是真源，这里显式断言防止再次静默漏发。
+const characterFile = 'assets/main-character.png';
+if (Array.isArray(pkg.files) && pkg.files.includes(characterFile)) ok(`files includes ${characterFile}`);
+else fail(`package.json files must include ${characterFile} (character reference would not ship)`);
 
 // 估算将进包的总大小：跳过 node_modules、.git、脚本、母版目录与 preview，
 // 另不计 sourcemap 与 npm pack 遗留的 tarball。

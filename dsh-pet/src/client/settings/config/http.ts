@@ -5,7 +5,7 @@
  * @module dsh-pet/src/client/settings/config/http
  */
 import { ROUTE_PATH } from '../../../shared/constants.ts';
-import type { FontConfig, ModelSelection, Pet, PhysicsParams } from '../../../shared/types.ts';
+import type { FontConfig, ModelSelection, Pet, PhysicsParams, Weights } from '../../../shared/types.ts';
 import type { ModelCatalogGroup } from '../picker/index.ts';
 import type { MergedConfig } from './read.ts';
 
@@ -37,7 +37,7 @@ export interface SaveFields {
   chatAnimationEnabled: boolean;
   confineToScreen: boolean;
   trayEnabled: boolean;
-  /** 语音播报总开关。 */
+  /** 手动播报开关：手动触发的碎碎念与对话回复。 */
   voiceEnabled: boolean;
   /** 语音音色 id（白名单内的四个之一）。 */
   voiceName: string;
@@ -47,12 +47,16 @@ export interface SaveFields {
   voiceWhisperEnabled: boolean;
   /** 待办提醒要不要念出来。 */
   voiceTodoEnabled: boolean;
+  /** 工作状态播报要不要念出来（任务完成 / 出错 / 等确认时念一句配置台词）。 */
+  voiceNotifyEnabled: boolean;
   physics: PhysicsParams;
   whisperModel: ModelSelection;
   chatModel: ModelSelection;
   chatMemoryRounds: number;
   chatImageLimit: number;
   font: FontConfig;
+  /** 动作频率权重（main 条目）：三项合计 ≤ 100，随机动作是余量。 */
+  animationWeights: Weights;
 }
 
 /** 保存结果：调用方按 `kind` 分支，不再猜 HTTP 细节。 */
@@ -83,12 +87,14 @@ export function buildSaveBody(fields: SaveFields): Record<string, unknown> {
     voiceVolume: fields.voiceVolume,
     voiceWhisperEnabled: fields.voiceWhisperEnabled,
     voiceTodoEnabled: fields.voiceTodoEnabled,
+    voiceNotifyEnabled: fields.voiceNotifyEnabled,
     physics: fields.physics,
     whisperModel: fields.whisperModel,
     chatModel: fields.chatModel,
     chatMemoryRounds: fields.chatMemoryRounds,
     chatImageLimit: fields.chatImageLimit,
     font: fields.font,
+    animationWeights: fields.animationWeights,
   };
 }
 

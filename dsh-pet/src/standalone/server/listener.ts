@@ -9,12 +9,13 @@ import { createRequestSecurity, rejectRequest, secureResponse, type RequestSecur
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { settingsPage, settingsScript, settingsStyle } from '../settings-page.ts';
+import { readChatPanelScript } from '../chat-panel-asset.ts';
 import { readSettingsIcon } from '../icon.ts';
 import { MAX_REQUEST_BYTES, MAX_SETTINGS_BYTES, boundedRequest } from '../request-body.ts';
 import { type StandaloneLogger } from '../context.ts';
 import { DEFAULT_STANDALONE_PORT, PORT_SCAN_LIMIT } from './options.ts';
 import type { StandaloneServer, StandaloneServerOptions } from './options.ts';
-import { settingsHandler, testHandler } from './handlers.ts';
+import { balanceHandler, modelsHandler, settingsHandler, testHandler } from './handlers.ts';
 import { fail, matches, sendAsset, sendIcon, sendJson } from './respond.ts';
 
 /** 组装请求分发器：先处理探针、设置页与停机，再交给插件路由。 */
@@ -24,6 +25,8 @@ function dispatch(
 ): (req: IncomingMessage, res: ServerResponse, pathname: string) => void {
   const settings = settingsHandler(options.ai);
   const tester = testHandler(options.ai);
+  const models = modelsHandler(options.ai);
+  const balance = balanceHandler(options.ai);
   return (req, res, pathname) => {
     const method = req.method ?? 'GET';
     if (method === 'OPTIONS') {
@@ -77,6 +80,20 @@ function dispatch(
       sendIcon(res, icon);
       return;
     }
+    if (pathname === '/standalone-ai/chat-panel.js') {
+      if (method !== 'GET' && method !== 'HEAD') {
+        rejectRequest(res, 405, '仅支持 GET');
+        return;
+      }
+      // 构建产物随包发布；缺失只可能是没跑 bundle，明确回 404 而不是给空脚本。
+      const chatPanel = readChatPanelScript();
+      if (chatPanel === undefined) {
+        rejectRequest(res, 404, '对话面板脚本缺失，请重新构建（npm run bundle）');
+        return;
+      }
+      sendAsset(res, chatPanel, 'text/javascript');
+      return;
+    }
     const asset = assets[pathname];
     if (asset) {
       if (method !== 'GET' && method !== 'HEAD') {
@@ -92,6 +109,14 @@ function dispatch(
     }
     if (pathname === '/standalone-ai/test') {
       void tester(req, res).catch((error: unknown) => fail(res, error, options.logger));
+      return;
+    }
+    if (pathname === '/standalone-ai/models') {
+      void models(req, res).catch((error: unknown) => fail(res, error, options.logger));
+      return;
+    }
+    if (pathname === '/standalone-ai/balance') {
+      void balance(req, res).catch((error: unknown) => fail(res, error, options.logger));
       return;
     }
     const route = options.routes.find((candidate) => matches(candidate, pathname));

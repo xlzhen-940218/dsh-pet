@@ -9,6 +9,7 @@ import { balancePageCount as balancePageCountOf, type BalanceState } from '../..
 import {
   BUBBLE_HOLD_IDLE,
   reduceBubbleHold,
+  utteranceToHold,
   type BubbleHoldEvent,
   type BubbleHoldState,
 } from '../../../shared/bubble-hold.ts';
@@ -92,6 +93,8 @@ export type WhisperBubbleComponent = (props: {
   url?: string;
   assetRoot?: string;
   on: boolean;
+  /** 可点时的回调；工作气泡用它跳会话，缺省即不可点。 */
+  onClick?: (e: ReactNS.MouseEvent<HTMLDivElement>) => void;
 }) => ReactNode;
 
 /** 注入的 react 能力。 */
@@ -131,6 +134,10 @@ export interface BubbleSlotsInput {
   workStatusEnabled: boolean;
   /** 工作状态是否处于终态。 */
   workTerminal: boolean;
+  /** 当前展示条目所属会话；有值才把工作气泡做成可点。 */
+  workSessionId?: string | null;
+  /** 点工作气泡时跳过去；缺省即不可点（网页端直接切，桌面端由容器转发）。 */
+  onFocusSession?: (sessionId: string) => void;
   /** 说话气泡配图的素材根。 */
   assetRoot?: string;
 }
@@ -252,7 +259,7 @@ export function createBubbleSlots(rt: BubbleSlotsRuntime, components: BubbleComp
       () =>
         subscribeVoiceUtterance((event) => {
           if (event.text !== whisperTextRef.current) return;
-          applyWhisperHold({ kind: event.kind === 'start' ? 'hold' : 'release', seq: event.seq });
+          applyWhisperHold(utteranceToHold(event));
         }),
       // eslint-disable-next-line react-hooks/exhaustive-deps -- 订阅只建一次：收起计划全部经 ref 现读，重订阅只会漏事件
       [],
@@ -330,7 +337,16 @@ export function createBubbleSlots(rt: BubbleSlotsRuntime, components: BubbleComp
       }
       // 终态与非终态共用同一个组件，差别只在停留时长与优先级。
       if (slot === 'work' || slot === 'work-terminal') {
-        return workText === null ? null : h(WhisperBubble, { text: workText, on: workOn });
+        if (workText === null) return null;
+        const sessionId = input.workSessionId ?? '';
+        const onFocus = input.onFocusSession;
+        // 拿不到会话就别做成可点：点下去没有任何去处，比不可点更糟。
+        const onClick = sessionId !== '' && onFocus !== undefined ? () => onFocus(sessionId) : undefined;
+        return h(WhisperBubble, {
+          text: workText,
+          on: workOn,
+          ...(onClick === undefined ? {} : { onClick }),
+        });
       }
       return null;
     };

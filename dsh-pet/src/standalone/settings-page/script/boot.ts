@@ -1,7 +1,8 @@
 /**
  * 设置页启动：分区切换、初次加载与保存按钮接线。
  *
- * 两个面板各自加载各自的接口；桌宠配置读 /config，AI 面板读 /standalone-ai/settings。
+ * 配置页把桌宠与 AI 两块放在同一个面板里，各自加载各自的接口：桌宠读 /config，
+ * AI 读 /standalone-ai/settings，两套保存互不影响。
  * 缺令牌时只提示、不发任何请求——本页所有写操作都依赖那次运行有效的凭证。
  * @module dsh-pet/src/standalone/settings-page/script/boot
  */
@@ -10,6 +11,7 @@
 export function bootScript(): string {
   return `
 let protocolSelect = null;
+let balanceSelect = null;
 
 function mountProtocolSelect() {
   const host = byId('protocol-host');
@@ -20,20 +22,49 @@ function mountProtocolSelect() {
       { value: 'anthropic', label: 'Anthropic' },
     ],
     'openai-compatible',
-    () => {},
+    () => forgetModelOptions(),
   );
   protocolSelect.root.firstElementChild.setAttribute('aria-labelledby', 'protocol-label');
   host.append(protocolSelect.root);
 }
 
+function mountBalanceSelect() {
+  const host = byId('balance-provider-host');
+  if (!host) return;
+  balanceSelect = createSelect(
+    [
+      { value: '', label: '不查询余额' },
+      { value: 'deepseek-official', label: 'DeepSeek 官方' },
+      { value: 'opencode-go', label: 'opencode Go' },
+      { value: 'commandcode', label: 'commandcode' },
+    ],
+    '',
+    (picked) => {
+      const button = byId('balance-btn');
+      if (button) button.disabled = picked === '';
+      const result = byId('balance-result');
+      if (result) {
+        result.textContent = '';
+        result.dataset.ok = '';
+        result.dataset.error = '';
+      }
+    },
+  );
+  balanceSelect.root.firstElementChild.setAttribute('aria-labelledby', 'balance-provider-label');
+  host.append(balanceSelect.root);
+}
+
 function selectTab(name) {
   for (const cell of document.querySelectorAll('[data-tab]')) {
-    cell.setAttribute('aria-selected', cell.dataset.tab === name ? 'true' : 'false');
+    const active = cell.dataset.tab === name;
+    cell.setAttribute('aria-selected', active ? 'true' : 'false');
+    const panel = byId('panel-' + cell.dataset.tab);
+    if (panel) panel.hidden = !active;
+    if (active && cell.dataset.title) {
+      const title = byId('page-title');
+      if (title) title.textContent = cell.dataset.title;
+    }
   }
-  const pets = byId('panel-pets');
-  const ai = byId('panel-ai');
-  if (pets) pets.hidden = name !== 'pets';
-  if (ai) ai.hidden = name !== 'ai';
 }
 
 function wireTabs() {
@@ -83,14 +114,11 @@ async function loadAi() {
 
 function boot() {
   wireTabs();
-  selectTab('pets');
-  if (!TOKEN) {
-    const hint = '请从桌宠菜单或本机启动器打开设置，以获得本次运行的访问凭据。';
-    setStatus(byId('pet-status'), hint, 'error');
-    setStatus(byId('status'), hint, 'error');
-    return;
-  }
+  selectTab('chat');
+  // 刷新后地址栏里的令牌已被清掉，此时靠首次访问换来的 HttpOnly cookie 继续；
+  // cookie 也没了的时候，各面板自己的请求会失败并显示重新打开设置的提示。
   mountProtocolSelect();
+  mountBalanceSelect();
   wireAiPanel();
   byId('pet-save').addEventListener('click', savePets);
   window.addEventListener('beforeunload', (event) => {

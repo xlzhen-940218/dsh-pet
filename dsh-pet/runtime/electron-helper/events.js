@@ -21,11 +21,14 @@ PetSprite.prototype.onWorkTick = function onWorkTick(snapshot, tick) {
   if (this.frozen) return;
   const state = snapshot && snapshot.state ? snapshot.state : null;
   this.workState = state; // 当前工作状态：互动/事件动画播完恢复档位循环用
+  // 当前展示条目所属会话：点气泡跳过去要用它。外部槽（`api`）宿主已写成 null，这里只认非空串。
+  this.workSessionId =
+    snapshot && typeof snapshot.sessionId === 'string' && snapshot.sessionId ? snapshot.sessionId : null;
   const stateChanged = this.prevWorkState !== state;
   this.prevWorkState = state;
   if (!state) {
     // 回空闲：把正在循环播的进行中档位动画改成「播完即停」。进行中档位走 switchTo(name, false)
-    // （loop=true、onended=null），ended 永不触发；这里不切动画，链就拿不到推进信号，
+    // （loop=true），正常不触发 ended；这里不切动画，链就拿不到推进信号，
     // 宠物会卡在那段工作动画上。只改当前段：它结束后走 handleEnded → playIdle。
     // 睡觉时前台那段是睡姿循环：改掉它的 loop/onended 会既打断睡姿又把随机链拽回来，跳过。
     if (!this.sleeping && S.poolIncludes(this.animations.events?.workStatus ?? [], this.anim)) {
@@ -40,6 +43,7 @@ PetSprite.prototype.onWorkTick = function onWorkTick(snapshot, tick) {
     this.workTimer = null;
     this.workOn = false;
     this.workText = null;
+    this.workSessionId = null;
     this.renderBubble();
     return;
   }
@@ -95,6 +99,20 @@ PetSprite.prototype.onWorkTick = function onWorkTick(snapshot, tick) {
   const rotating = !terminal && Array.isArray(slot) && slot.length > 1;
   if (terminal || rotating) this.playOnce(name);
   else this.switchTo(name, false); // 进行中循环播（单动画/单候选档位）
+};
+
+// 点工作气泡：发「切到这条会话」的意图，再请主进程把 DSH 主窗口提到前台。
+// 提窗口必须走主进程的 dsh://（与右键「打开软件」同一条路）：页面侧的 iframe 唤不动被挡住的窗口。
+// 桌面宠物是独立渲染进程、拿不到页面的会话服务，跨进程这一跳只能经宿主中转（契约见 openapi 的 /focus-session）。
+PetSprite.prototype.openWorkSession = function openWorkSession() {
+  const sessionId = this.workSessionId;
+  if (!sessionId) return;
+  S.postAction(FOCUS_SESSION_URL, { sessionId }).then((ok) => {
+    if (!ok) console.warn('[dsh-pet] 跳会话：宿主未接受 pet=' + this.pet.id);
+  });
+  if (window.petBridge && typeof window.petBridge.focusDshHost === 'function') {
+    window.petBridge.focusDshHost();
+  }
 };
 
 // 余额事件：自动轮询按 balanceEnabled 门控，手动请求无条件。
@@ -471,7 +489,9 @@ function startLoops() {
   // 语音每句的开始/结束推进气泡的收起计划：合成慢时气泡挂住，播完再收。
   // 按文本认句：本窗口只装一只宠物，但同一份状态是模块单例，认句才不会算到别人头上。
   S.subscribeVoiceUtterance((event) => {
-    for (const s of sprites) if (s.whisperText === event.text) s.applyWhisperHold(event);
+    // 状态机只认 hold/release，语音给的是 start/end：翻译与网页端共用同一份，别再各写一遍。
+    const hold = S.utteranceToHold(event);
+    for (const s of sprites) if (s.whisperText === event.text) s.applyWhisperHold(hold);
   });
 
   // 统一轮询是自调度的长轮询（请求 → 处理 → 立刻再请求）：宿主在版本没变时挂起，空闲时

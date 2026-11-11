@@ -9,7 +9,13 @@
 import { z } from 'zod';
 import { readAiSettings, writeAiSettings } from './ai-storage.ts';
 
-/** 对外可见的设置视图：密钥只以 hasKey 表示。 */
+/**
+ * 余额查询可选的服务商，空串表示不查询。
+ * `deepseek-account` 不在其中：它读的是 DSH 登录态，独立模式没有账号服务，选了也只会拿到 credential-missing。
+ */
+export const BALANCE_PROVIDERS = ['', 'deepseek-official', 'opencode-go', 'commandcode'] as const;
+
+/** 对外可见的设置视图：密钥只以 hasKey 表示；AI 是否可用只看地址、模型与密钥是否齐全。 */
 export interface StandaloneAiPublicSettings {
   /** 接口协议，仅支持 OpenAI 兼容与 Anthropic 两种。 */
   protocol: 'openai-compatible' | 'anthropic';
@@ -17,8 +23,8 @@ export interface StandaloneAiPublicSettings {
   baseUrl: string;
   /** 模型标识，原样传给服务商。 */
   model: string;
-  /** 是否允许发起模型请求。 */
-  enabled: boolean;
+  /** 余额查询走哪个服务商的接口；空串表示不查询。与 baseUrl 无关，用于独立模式复用 host 半侧的余额定义。 */
+  balanceProvider: (typeof BALANCE_PROVIDERS)[number];
   /** 兼容旧配置文件的遗留字段，已不参与任何调度；保留只为让旧文件继续通过 strict 校验。 */
   automaticWhispers: boolean;
   /** 兼容旧配置文件的遗留字段；碎碎念周期唯一来源是宠物配置的 `eventsRefreshSec.whisper`。 */
@@ -30,15 +36,20 @@ export interface StandaloneAiPublicSettings {
   /** 是否已保存密钥，不回传密钥本身。 */
   hasKey: boolean;
 }
-/** 内部成品配置：在公开视图上补回明文密钥。 */
-export type StandaloneAiSettings = Omit<StandaloneAiPublicSettings, 'hasKey'> & { apiKey: string };
+/** 内部成品配置：在公开视图上补回明文密钥，以及只为文件兼容保留的启用位。 */
+export type StandaloneAiSettings = Omit<StandaloneAiPublicSettings, 'hasKey'> & {
+  apiKey: string;
+  /** 兼容旧配置文件的遗留字段，恒为 true；旧文件里的 false 读入后即被覆盖。 */
+  enabled: boolean;
+};
 
 /** 默认成品配置；未配置时 AI 保持关闭。 */
 export const DEFAULT_AI_SETTINGS: Readonly<StandaloneAiSettings> = Object.freeze({
   protocol: 'openai-compatible',
   baseUrl: '',
   model: '',
-  enabled: false,
+  balanceProvider: '',
+  enabled: true,
   automaticWhispers: false,
   whisperIntervalSec: 300,
   maxTokens: 1024,
@@ -79,6 +90,9 @@ const fields = {
     .trim()
     .max(200)
     .refine((s) => !containsControlChar(s)),
+  /** 余额查询的服务商；空串表示不查询。 */
+  balanceProvider: z.enum(BALANCE_PROVIDERS),
+  /** 只为旧文件兼容保留：保存时一律写 true，可用性由地址、模型与密钥决定。 */
   enabled: z.boolean(),
   automaticWhispers: z.boolean(),
   whisperIntervalSec: z.number().int().min(60).max(86400),
@@ -99,7 +113,7 @@ const patchSchema = persistedSchema.partial().extend({ clearApiKey: z.boolean().
  * @param input - 调用方给出的补丁，可能只含部分字段。
  * @param previous - 上一份成品配置，用作未提供字段的基线。
  * @returns 校验并合并后的新的成品配置。
- * @throws 字段越界、清空与写入冲突，或启用却缺地址、模型与密钥时抛出。
+ * @throws 字段越界，或清空与写入密钥同时出现时。
  */
 export function validateSettings(input: unknown, previous: Readonly<StandaloneAiSettings>): StandaloneAiSettings {
   try {
@@ -108,18 +122,18 @@ export function validateSettings(input: unknown, previous: Readonly<StandaloneAi
     if (patch.clearApiKey && patch.apiKey) throw new Error('Conflicting key changes');
     const { clearApiKey, ...values } = patch;
     const apiKey = clearApiKey ? '' : values.apiKey || previous.apiKey;
-    const next = persistedSchema.parse({ ...previous, ...values, apiKey });
-    // 启用前必须有地址、模型与密钥，避免发出必然失败的请求。
-    if (next.enabled && (!next.model || !next.baseUrl || !next.apiKey)) throw new Error('Incomplete settings');
-    return next;
+    // 配置填一半只是暂时不可用，不该连保存都拒绝；启用位不再有语义，一律写回 true。
+    return persistedSchema.parse({ ...previous, ...values, apiKey, enabled: true });
   } catch {
     throw new Error('Invalid standalone AI settings.');
   }
 }
 
-/** 去掉密钥，只保留是否已保存。 */
+/** 去掉密钥与启用位，只保留是否已保存密钥。 */
 function redact(settings: Readonly<StandaloneAiSettings>): StandaloneAiPublicSettings {
-  const { apiKey, ...publicFields } = settings;
+  const { apiKey, enabled, ...publicFields } = settings;
+  // 启用位只为旧文件保留，不进对外视图；解构出来显式丢弃，否则 lint 会当成未使用变量。
+  void enabled;
   return { ...publicFields, hasKey: apiKey.length > 0 };
 }
 
@@ -143,9 +157,11 @@ export function createAiConfig(home: string): AiConfigStore {
   let settings: Readonly<StandaloneAiSettings> = DEFAULT_AI_SETTINGS;
   try {
     const loaded = readAiSettings(home);
-    // 持久化内容也要重新校验，坏数据不能进入内存。
+    // 旧配置文件没有后加的字段，先铺默认值再校验；否则升级后 strict 校验会拒绝整个文件，独立模式起不来。
     if (loaded !== undefined)
-      settings = Object.freeze(validateSettings(persistedSchema.parse(loaded), DEFAULT_AI_SETTINGS));
+      settings = Object.freeze(
+        validateSettings(persistedSchema.parse({ ...DEFAULT_AI_SETTINGS, ...loaded }), DEFAULT_AI_SETTINGS),
+      );
   } catch {
     // 读取失败说明无法确认文件权限，宁可整体失败。
     throw new Error('Cannot securely load standalone AI settings.');

@@ -13,8 +13,15 @@ import type { AddressInfo } from 'node:net';
 import type { RegisteredRoute } from '../standalone/context.ts';
 import { boundedRequest, MAX_REQUEST_BYTES, MAX_SETTINGS_BYTES } from '../standalone/request-body.ts';
 import { rejectRequest, type RequestSecurity } from '../standalone/request-security.ts';
-import { settingsHandler, testHandler, type StandaloneServerOptions } from '../standalone/server.ts';
+import {
+  balanceHandler,
+  modelsHandler,
+  settingsHandler,
+  testHandler,
+  type StandaloneServerOptions,
+} from '../standalone/server.ts';
 import { sendIcon } from '../standalone/server/respond.ts';
+import { readChatPanelScript } from '../standalone/chat-panel-asset.ts';
 import { readSettingsIcon } from '../standalone/icon.ts';
 import { settingsPage, settingsScript, settingsStyle } from '../standalone/settings-page.ts';
 
@@ -25,6 +32,8 @@ interface RouterDeps {
   log(message: string): void;
   status(port: number): unknown;
   landingPage(port: number): string;
+  /** 对话面板脚本来源；缺省读包内 `lib/chat-panel.js`，测试可注入。 */
+  chatPanelScript?: () => string | undefined;
 }
 
 /**
@@ -37,7 +46,17 @@ export function startRouter(
   deps: RouterDeps,
 ): Promise<{ port: number; close: () => Promise<void> }> {
   const settings = settingsHandler(deps.ai);
+  const chatPanelScript = deps.chatPanelScript ?? readChatPanelScript;
   const tester = testHandler(deps.ai);
+  const models = modelsHandler(deps.ai);
+  const balance = balanceHandler(deps.ai);
+  /** 独立模式自带的 AI 路由：路径即处理器的查表，条目再多也不会把分支嵌套加深。 */
+  const aiRoutes: Record<string, typeof settings> = {
+    '/standalone-ai/settings': settings,
+    '/standalone-ai/test': tester,
+    '/standalone-ai/models': models,
+    '/standalone-ai/balance': balance,
+  };
   let boundPort = 0;
 
   const server = createServer((req, res) => {
@@ -81,6 +100,20 @@ export function startRouter(
         sendIcon(res, icon);
         return;
       }
+      if (url.pathname === '/standalone-ai/chat-panel.js') {
+        if (method !== 'GET' && method !== 'HEAD') {
+          rejectRequest(res, 405, '仅支持 GET');
+          return;
+        }
+        // 与 CLI 侧共用同一份产物：设置页固定引用它，打包应用里缺这条路由会让对话区空白。
+        const chatPanel = chatPanelScript();
+        if (chatPanel === undefined) {
+          rejectRequest(res, 404, '对话面板脚本缺失，请重新构建（npm run bundle）');
+          return;
+        }
+        sendText(res, 200, 'text/javascript', chatPanel);
+        return;
+      }
       const asset = assets[url.pathname];
       if (asset || url.pathname === '/health' || url.pathname === '/') {
         if (method !== 'GET' && method !== 'HEAD') {
@@ -93,8 +126,9 @@ export function startRouter(
         else sendText(res, 200, 'text/html', deps.landingPage(boundPort));
         return;
       }
-      if (url.pathname === '/standalone-ai/settings' || url.pathname === '/standalone-ai/test') {
-        await (url.pathname === '/standalone-ai/test' ? tester : settings)(request, res);
+      const aiHandler = aiRoutes[url.pathname];
+      if (aiHandler) {
+        await aiHandler(request, res);
         return;
       }
       if (!route) {

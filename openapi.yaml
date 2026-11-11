@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: dsh-pet HTTP API
-  version: 0.4.0
+  version: 0.4.7
   summary: DSH 桌宠插件的宿主 HTTP 接口
   description: |
     dsh-pet 的宿主（host）半侧通过 DSH 的 `webServer` 服务注册**一条前缀路由** `/dsh-pet-7340`，
@@ -317,6 +317,40 @@ paths:
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
 
+  /dsh-pet-7340/focus-session:
+    post:
+      tags: [Action]
+      operationId: focusSession
+      summary: 请求页面切到指定会话
+      description: |
+        让页面切到指定会话。动作端点：只把意图写进 `sections.focusSession`，
+        不返回跳转结果，也不校验该会话是否存在（未知 id 由页面侧忽略）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sessionId]
+              properties:
+                sessionId:
+                  type: string
+                  description: |
+                    目标会话 id。`trim()` 后不得为空、不得是哨兵值 `unknown`，
+                    上限 128 字符；不满足时 `ok: false` + `reason: bad-request`。
+                  example: session-742cf7de-d1ce-4694-bfde-77158ce9e0ca
+      responses:
+        "200":
+          description: 意图已写入 `sections.focusSession`（不代表页面已经切过去）。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FocusSessionResponse"
+        "400":
+          description: "请求体不是合法 JSON（`reason: invalid-json`）。"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
   /dsh-pet-7340/whisper:
     post:
       tags: [Action]
@@ -464,6 +498,15 @@ paths:
                     是否联动一次 `events.whisper` 动画。缺省 `true`（老行为）。
                     **只有严格 `false` 才关闭**——其余值（含 `"false"` 字符串）一律按"要联动"处理。
                   example: false
+                speak:
+                  type: boolean
+                  default: false
+                  description: |
+                    本次是否把这句话**念出来**。缺省 `false` = 只弹气泡、不出声。
+                    **只有严格 `true` 才播**——其余值（含 `"true"` 字符串）一律按不播处理。
+                    与 `?surface=` 是两道门：`speak: true` 且 `surface` 指定到具体一端（`web` / `desktop`）
+                    才写 `voiceTo`；`both` / `any` / 不带 `surface` 时不指定端，谁都不念。
+                  example: true
             examples:
               textOnly:
                 summary: 只说一句（缺省 10 秒 + 联动动画）
@@ -1834,7 +1877,7 @@ paths:
           `whisperEnabled`/`workStatusEnabled`/`fixedEnabled`/`display`/`position`，以及顶层
           `notificationsEnabled`/`clickSoundEnabled`/`whisperImageEnabled`/`chatImageEnabled`/
           `chatAnimationEnabled`/`confineToScreen`/`trayEnabled`/`voiceEnabled`/`voiceName`/`voiceWhisperEnabled`/
-          `voiceTodoEnabled`/`physics`/`font`/`whisperModel`/`chatModel`/`chatMemoryRounds`/
+          `voiceTodoEnabled`/`voiceNotifyEnabled`/`physics`/`font`/`whisperModel`/`chatModel`/`chatMemoryRounds`/
           `chatImageLimit`。
           其余字段会沿用磁盘上用户文件里的原值（透传保留），所以设置页保存
           **不会抹掉**你手写的精调配置（`whisperPrompt`/`memes`/`eventsRefreshSec` 等）。
@@ -2471,26 +2514,196 @@ paths:
         "405":
           description: 方法不是 GET。
 
-  /dsh-pet-7340/logo:
+  /dsh-pet-7340/character:
     get:
       tags: [Assets]
-      operationId: getLogo
-      summary: 获取插件 logo
+      operationId: getCharacter
+      summary: 获取角色参考图（第三方自建生图时对齐角色）
       description: |
-        包内 `assets/logo.png`。只放行这一个文件——`assets/` 根下还有配置文件，不开放成静态目录，
-        所以路径不接受额外段（多一段是 400）。对话面板用它当宠物头像。
+        按素材根回一张角色参考图（通常是三视图），给第三方插件自己做生图时保持角色一致用。
+
+        **dsh-pet 不代调生图模型**：这个端点只交付「什么叫像这只角色」，出图、模型、key 与
+        计费都在调用方。所以它不需要图像服务商配置，也不消耗宿主的额度。
+
+        查找顺序：`pet/<素材根>-character.<ext>`（pet pack 自带）→ 包内
+        `assets/<素材根>-character.<ext>`（随包发布）。扩展名按 png / jpg / jpeg / webp / gif
+        依次探测，命中第一个即返回；扩展名同时决定 `content-type`。
+
+        参数名是 `root` 而不是 `pet`：要的是素材根（目录前缀），不是其它端点 `PetIdQuery.pet`
+        的宠物实例 id。与 `/logo?root=`、`/pet-avatar?root=` 同口径。
+      parameters:
+        - name: root
+          in: query
+          required: true
+          description: |
+            素材根（`pet/<名>-config.json(c)` 的文件名前缀）——**必填**，没有缺省值：
+            猜一个默认值会让调用方静默拿到别只宠物的脸。含路径分隔符等非法字符 → 400。
+          schema:
+            type: string
+          example: main
       responses:
         "200":
-          description: PNG 图片
+          description: |
+            图片字节；`content-type` 由命中的扩展名决定。
           content:
             image/png:
               schema:
                 type: string
                 format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+            image/gif:
+              schema:
+                type: string
+                format: binary
         "400":
-          description: 路径带了额外段（`text/plain`）。
+          description: 缺 `root`，或 `root` 含路径分隔符等非法字符（`text/plain`）。
+        "404":
+          description: "该素材根没有角色参考图（`text/plain`，正文 `dsh-pet: character not found`）。"
+
+  /dsh-pet-7340/logo:
+    get:
+      tags: [Assets]
+      operationId: getLogo
+      summary: 获取宠物头像（缺省是插件 logo）
+      description: |
+        不带参数时回包内 `assets/logo.png`。只放行这一个文件——`assets/` 根下还有配置文件，
+        不开放成静态目录，所以路径不接受额外段（多一段是 400）。
+
+        带 `root=<素材根>` 时先找该 pet pack 上传的头像（`pet/<素材根>-avatar.<ext>`，
+        扩展名由文件头判定，可为 png / jpg / webp / gif）；没上传过就回退包内 logo。
+        `root=main`（内置条目）**不查**自定义文件，永远回包内 logo。
+
+        参数名是 `root` 而不是 `pet`：这里要的是素材根（目录前缀，如 `baimao`），不是其它端点
+        `PetIdQuery.pet` 的宠物实例 id（`pets[].id`，如 `main`）。同名不同义会让人按 `pet` 的既有
+        语义调用后静默拿到默认图。
+
+        `v` 是任意缓存破障参数，宿主不解析。
+      parameters:
+        - name: root
+          in: query
+          required: false
+          description: |
+            素材根（`pet/<名>-config.json(c)` 的文件名前缀）。缺省或 `main` → 回包内 logo。
+            含路径分隔符等非法字符 → 400。
+          schema:
+            type: string
+          example: baimao
+        - name: v
+          in: query
+          required: false
+          description: 缓存破障用的版本号（打开面板 / 刷新 / 上传成功时换一个），宿主忽略。
+          schema:
+            type: string
+      responses:
+        "200":
+          description: |
+            图片。默认是 PNG；`root` 命中自定义头像时按文件实际类型。
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+            image/gif:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: 路径带了额外段，或 `root` 含路径分隔符等非法字符（`text/plain`）。
         "404":
           description: 包内没有 logo（安装损坏，`text/plain`）。
+
+  /dsh-pet-7340/pet-avatar:
+    post:
+      tags: [Assets]
+      operationId: uploadPetAvatar
+      summary: 上传 / 覆盖 pet pack 的头像
+      description: |
+        把一张图片写成 `pet/<素材根>-avatar.<ext>`，覆盖同一素材根的旧头像。
+        扩展名由**文件头的魔数**决定（png / jpg / webp / gif），不信文件名；换格式时会清掉旧的
+        其它扩展名，多份并存读取时也按修改时间取最新那份。
+
+        为什么走 base64 而不是二进制裸流：宿主请求体统一按 utf8 解码，二进制在解码处就被破坏。
+
+        必须知道的几点：
+
+        - **只属于 pet pack**：`root=main`（内置条目）直接拒绝——`pet/` 目录不接内置的头像，
+          内置永远用插件默认 logo。
+        - **上限 768 KiB（解码后）**：请求体上限 1 MiB，base64 膨胀 4/3，所以原图约 750 KB 封顶；
+          设置页会先把图缩到长边 512 再上传。
+        - **只校验「文件头像图片 + 在预算内」**：不裁剪、不重编码，尺寸与画质由调用方担保。
+        - 落盘后**立即生效**：不是配置字段，不需要 `PUT /config`，也不重启桌面 Helper。
+        - 同一素材根的所有实例**共用**一张头像（文件按素材根命名，不按实例 id）。
+      parameters:
+        - name: root
+          in: query
+          required: true
+          description: |
+            素材根（`pet/<名>-config.json(c)` 的文件名前缀）——**必填**，且不能是 `main`。
+          schema:
+            type: string
+          example: baimao
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [base64]
+              properties:
+                base64:
+                  type: string
+                  description: |
+                    不带 `data:` 前缀的规范 base64。非规范输入会被拒（与 `/chat` 的附件校验同一口径），
+                    不会静默解出别的字节。
+            examples:
+              upload:
+                summary: 给 baimao 换一张 PNG
+                value:
+                  base64: iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==
+      responses:
+        "200":
+          description: |
+            **成功** → `{ ok: true }`；
+            **业务失败** → `{ ok: false, reason, message }`（业务结论不用 400/404 表达）。
+
+            `reason` 取值：`bad-request`（缺 `root` / `root` 非法 / `root` 为 `main` /
+            `base64` 缺失或非规范）、`unsupported`（文件头不是 PNG / JPEG / WebP / GIF）、
+            `internal-error`（写盘失败）。
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/OkResponse"
+                  - $ref: "#/components/schemas/FailureResponse"
+        "400":
+          description: '请求体不是合法 JSON：`400` + `{"ok":false,"reason":"invalid-json"}`'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FailureResponse"
+        "413":
+          description: '解码后超过 768 KiB：`413` + `{"ok":false,"reason":"payload-too-large"}`'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FailureResponse"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
 
   "/dsh-pet-7340/sound/{file}":
     get:
@@ -2602,8 +2815,9 @@ paths:
       summary: 注册第三方右键菜单项（该 owner 的菜单项整体覆盖）
       description: |
         别的插件想在桌宠右键菜单里加自己的入口时用它。所有第三方菜单项统一收在**「更多」**这个
-        一级菜单下；某个 owner 只有一项时跳过 owner 那层直接平铺（`更多 / 弹弓`），两项及以上才
-        分组（`更多 / 小游戏 / 弹弓`）。0 项时「更多」不出现。
+        一级菜单下：`label` 在全部第三方项里唯一时直接平铺（`更多 / 弹弓`）；`label` 重名时，
+        每个 `owner` 在「更多」下各占一个子菜单（`更多 / owner / label`），靠它区分同名项。
+        宿主自己的菜单项固定，不参与重名判定。
 
         **注册 = 整体覆盖**：该 owner 当前的全部菜单项 = 本次 `labels`（不在列表里的项连同触发
         标记一起丢弃）。每次调用都用一份完整列表描述"我现在有什么"，所以不会留下僵尸项，调用方
@@ -3052,6 +3266,25 @@ components:
           const: true
       description: 动作已完成。数据请从 `GET /state` 读取。
 
+    FocusSessionResponse:
+      type: object
+      required: [ok, sessionId, ts]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        sessionId:
+          type: string
+          description: 已写入的会话 id（已裁掉首尾空白）。
+        ts:
+          type: integer
+          description: |
+            写入时刻（毫秒）。消费端拿它和自己的「已处理水位」比较，
+            大于水位才跳转——页面晚于写入加载时靠这一条重放，不会被首拉基线吞掉。
+      description: |
+        意图已写入 `sections.focusSession`。这不表示页面已经切过去：
+        页面在轮询到该叶子、且 `ts` 大于本地水位时才执行切换。
+
     SayResponse:
       type: object
       required: [ok, text]
@@ -3210,7 +3443,7 @@ components:
         sections:
           type: object
           description: 全局段（所有端共享一份）
-          required: [balance, workStatus, notify, config]
+          required: [balance, workStatus, notify, config, focusSession]
           properties:
             balance:
               $ref: "#/components/schemas/BalanceLeaf"
@@ -3220,6 +3453,8 @@ components:
               $ref: "#/components/schemas/NotifyLeaf"
             config:
               $ref: "#/components/schemas/ConfigLeaf"
+            focusSession:
+              $ref: "#/components/schemas/FocusSessionLeaf"
         pets:
           type: object
           description: 每只宠物各自一份；键是宠物 id（**可含点号，勿切分**）
@@ -3538,6 +3773,29 @@ components:
           type: object
           description: 恒为 `{}`（空对象）。不要从这里读配置内容——去 `GET /config`。
           maxProperties: 0
+
+    FocusSessionLeaf:
+      type: object
+      required: [counter, data]
+      description: |
+        **跳会话指令**（一次性信号）。`data` 为 `{ sessionId, ts }`，由 `POST /focus-session` 写入。
+        `data` 为 `null` 表示从未写过。
+      properties:
+        counter:
+          $ref: "#/components/schemas/Counter"
+        data:
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [sessionId, ts]
+              properties:
+                sessionId:
+                  type: string
+                  description: 目标会话 id（已裁掉首尾空白）。
+                ts:
+                  type: integer
+                  format: int64
+                  description: 写入时刻（毫秒）。消费端据此判重，不回退。
 
     NotifyFrame:
       oneOf:
@@ -3924,7 +4182,8 @@ components:
           description: |
             **这一句该由哪一端念**。两条取值规则：
             路由上带 `?surface=` 的（`POST /whisper`、`POST /broadcast`）用请求面——`surface=web` / `desktop`
-            原样落地，`both` / `any` 不足以指定一端，退回第二条；其余来源（周期碎碎念、待办提醒、对话回复、
+            原样落地，`both` / `any` 不足以指定一端，退回第二条；其中 `POST /broadcast` 还要求 body 里
+            `speak: true`，缺省只弹气泡、不写这个字段；其余来源（周期碎碎念、待办提醒、对话回复、
             `/chat` 命令）按 `display` 推导：含 `desktop` 就写 `desktop`，只在网页显示才写 `web`——
             桌面端只要 helper 在跑就一定有窗口，网页端随时可能被关掉。
             缺省 = 谁都不念。消费端按自己所在的一端比对：不匹配就只弹气泡、不出声；同一端有多个页面时各自比对。
@@ -4125,16 +4384,40 @@ components:
             由模型在语境贴合时挑一个当场表演；关掉则纯文字。设置页「全局开关」卡里的「对话动作联动」写的就是它。
         confineToScreen:
           type: boolean
+        voiceEnabled:
+          type: boolean
+          description: |
+            手动播报开关（全局默认）：右键菜单、斜杠命令触发的碎碎念与对话回复是否念出来。
+            与 `voiceWhisperEnabled`/`voiceTodoEnabled`/`voiceNotifyEnabled` 平级，各自独立。
+            设置页「语音播报」卡里的「手动播报」开关写的就是它。缺失默认 `false`。
+        voiceName:
+          type: string
+          description: |
+            音色 id，白名单为 `/voice/voices` 里的四个中文音色之一；写错或留空即配置错误，
+            告警并回落到 `zh-CN-XiaoyiNeural`。设置页「语音播报」卡的音色下拉写的就是它。
+        voiceVolume:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: |
+            播放音量系数：0–1，1 = 最大音量，0 = 静音；四类语音共用这一个音量。
+            只改播放响度，不重新合成音频。设置页「语音播报」卡的音量输入框写的就是它。缺失默认 1。
         voiceWhisperEnabled:
           type: boolean
           description: |
-            周期碎碎念要不要念出来（全局默认）。受 `voiceEnabled` 总开关约束：总开关关掉时本项不生效。
+            周期碎碎念要不要念出来（全局默认）。
             设置页「语音播报」卡里的「碎碎念播报」开关写的就是它。缺失默认 `false`。
         voiceTodoEnabled:
           type: boolean
           description: |
-            待办提醒要不要念出来（全局默认）。同样受 `voiceEnabled` 总开关约束。
+            待办提醒要不要念出来（全局默认）。
             设置页「语音播报」卡里的「待办播报」开关写的就是它。缺失默认 `false`。
+        voiceNotifyEnabled:
+          type: boolean
+          description: |
+            工作状态播报要不要念出来（全局默认）：任务完成 / 出错 / 等你确认时念一句该档位配置的
+            工作状态文案；和系统通知同一取向，用户不在本页时才念。只念配置的台词，不念 `task`。
+            设置页「语音播报」卡里的「通知播报」开关写的就是它。缺失默认 `false`。
         chatMemoryRounds:
           type: integer
           minimum: 0

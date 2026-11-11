@@ -275,8 +275,8 @@ export function createCardEntry(rt: CardEntryRuntime) {
       [cfgRef],
     );
     // 悬停键共用一次挂载：L 开对话、按住 M 说话、S 截图、Z 切换睡/醒、D 开关待办、1-4 切显示位置。
-    // 除按住说话外都只在鼠标停在这只宠物上时生效；按住说话多一条——光标还在宠物自己的弹窗里也算，
-    // 否则弹窗一开焦点被输入框拿走，最想说话的时机反而按不动。
+    // 全部只在鼠标停在这只宠物上时生效；按住说话另有一条——焦点在宠物自己的弹窗里也算，
+    // 但在弹窗输入框里打字时不算（否则拼音里的 m 会被当成开录，见 createHearHold）。
     useEffect(() => {
       // 挂载时注册一次监听，但始终调用最新的闭包（它们读 ref，不能捕获旧值）。
       const offChat = bindOpenChat({
@@ -337,7 +337,7 @@ export function createCardEntry(rt: CardEntryRuntime) {
     /** 打开右键菜单。 */
     const handleContextMenu = (e: ReactNS.MouseEvent<HTMLDivElement>): void => {
       // 工具项与动作树；「查看余额」无条件显示，手动请求不受开关限制。
-      // 第三方菜单项收在「更多」下，0 项不出现，单 owner 单条时平铺（见 buildMoreBranch）。
+      // 第三方菜单项统一收在「更多」下：label 唯一的平铺，重名的按 owner 分子菜单（见 buildMoreBranch）。
       const more = buildMoreBranch(menuItemsRef.current);
       // 「配图」：按配置里的清单分成「纳入对话的配图 / 其他」，点一张就用它说一句。
       // 没有可用图时返回 null，整项不出现（不占一个点开是空的菜单）。

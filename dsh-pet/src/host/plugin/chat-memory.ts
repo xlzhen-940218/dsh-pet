@@ -20,6 +20,25 @@ import { SLEEP_TALK_INSTRUCTION } from '../whisper.ts';
 import { pickVoiceSurface, type VoiceTarget } from '../surface.ts';
 import type { HostSetup } from './setup.ts';
 import type { HostContext } from './context.ts';
+import {
+  activeChatMemoryProvider,
+  type ChatContent,
+  type ChatContentPatch,
+  type ChatTurn,
+} from '../chat-memory-provider.ts';
+
+/** 第三方召回的硬超时（ms）：到点按“不修改内容”继续生成，不拖住这一轮对话。 */
+const RECALL_TIMEOUT_MS = 1500;
+
+/** 校验召回补丁里的历史项：形状不对的整段丢弃，避免坏数据把生成打崩。 */
+function isChatTurn(value: unknown): value is ChatTurn {
+  const turn = value as { role?: unknown; content?: unknown; ts?: unknown } | null;
+  return (
+    (turn?.role === 'user' || turn?.role === 'assistant') &&
+    typeof turn?.content === 'string' &&
+    typeof turn?.ts === 'number'
+  );
+}
 
 /** 这一句该由哪一端念：取宠物实例的 display 推导（桌面优先）；两端都不显示时为 `undefined`。 */
 function voiceTargetFor(pet: Record<string, unknown>): VoiceTarget | undefined {
@@ -115,6 +134,64 @@ export function createChatMemory(deps: ChatMemoryInput) {
     return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 5;
   };
 
+  /**
+   * 对话前修改内容：召回钩子返回要覆盖的字段，核心合并后再交给模型。
+   *
+   * 超时、抛错、返回非法形状都当“不修改”，只记提供者 id 与原因。
+   *
+   * @param petId - 目标宠物；第三方按它区分记忆空间。
+   * @param content - 本轮将要发给模型的 system/history/userText。
+   * @returns 合法的覆盖字段；没有可应用的字段时 undefined。
+   */
+  const recallPatch = async (petId: string, content: ChatContent): Promise<ChatContentPatch | undefined> => {
+    const provider = activeChatMemoryProvider();
+    const recall = provider?.recall;
+    if (!provider || !recall) return undefined;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const timeout = new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), RECALL_TIMEOUT_MS);
+        timer.unref?.();
+      });
+      const result = await Promise.race([Promise.resolve(recall.call(provider, { petId, ...content })), timeout]);
+      if (!result || typeof result !== 'object') return undefined;
+      const patch: { system?: string; history?: readonly ChatTurn[]; userText?: string } = {};
+      if (typeof result.system === 'string') patch.system = result.system;
+      if (typeof result.userText === 'string') patch.userText = result.userText;
+      if (Array.isArray(result.history) && result.history.every(isChatTurn)) patch.history = result.history;
+      return Object.keys(patch).length === 0 ? undefined : patch;
+    } catch (error) {
+      log.warn(
+        '[dsh-pet] 记忆召回失败 id=' + provider.id + '：' + (error instanceof Error ? error.message : String(error)),
+      );
+      return undefined;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+
+  /**
+   * 落盘后接收这一轮问答：核心不等待，失败只记提供者 id 与原因。
+   *
+   * @param petId - 目标宠物。
+   * @param turn - 本轮问答与元信息；action/image 只是名字，不含素材本体。
+   */
+  const captureTurn = (
+    petId: string,
+    turn: { userText: string; replyText: string; action?: string; image?: string; ts: number },
+  ): void => {
+    const provider = activeChatMemoryProvider();
+    const capture = provider?.capture;
+    if (!provider || !capture) return;
+    void Promise.resolve()
+      .then(() => capture.call(provider, { petId, ...turn }))
+      .catch((error) => {
+        log.warn(
+          '[dsh-pet] 记忆接收失败 id=' + provider.id + '：' + (error instanceof Error ? error.message : String(error)),
+        );
+      });
+  };
+
   /** 生成并返回某宠物的一句碎碎念（周期调度、菜单手动触发与命令行共用）：人设取它自己的 whisperPrompt，
    *  没写回落到所属条目；成功写进 S 的 pets.<id>.say——碎碎念 / 命令气泡 / 对话回复在前端是同一条
    *  展示链路，所以共用一个叶子。配图开关开启时从表情包池随机抽 1 张。
@@ -142,11 +219,12 @@ export function createChatMemory(deps: ChatMemoryInput) {
     // 宠物可能在「校验那次读」与这里之间被删（配置随时会变，两次读之间就是窗口）：
     // 明确失败、不生成不写 S——写下去就是一只已不存在宠物的幽灵叶子（常驻到进程重启）。
     if (!found) return { ok: false, reason: 'unknown-pet', message: '没有这只桌宠：' + petId };
-    // 调用方没指定就按这只宠物自己的 display 推（桌面优先）。规则只写在这一处，
-    // 周期调度、斜杠命令这些调用点不必各算一遍。周期碎碎念另外受自己的开关管：
-    // 关掉就不写 voiceTo（叶子不带这个键 = 谁都不念），气泡照旧弹。
+    // 每一类语音由自己的开关决定：周期调度看 voiceWhisperEnabled，手动触发（右键菜单、
+    // 斜杠命令）看 voiceEnabled。叶子不带 voiceTo = 谁都不念，气泡照旧弹。
     const whisperVoiceOn = cfg.main?.voiceWhisperEnabled === true;
-    const target = kind === 'whisper' && !whisperVoiceOn ? undefined : (voiceTo ?? voiceTargetFor(found.pet));
+    const manualVoiceOn = cfg.main?.voiceEnabled === true;
+    const voiceOff = kind === 'whisper' ? !whisperVoiceOn : !manualVoiceOn;
+    const target = voiceOff ? undefined : (voiceTo ?? voiceTargetFor(found.pet));
     const system = petSystemPrompt(found);
     // 池只算一次：点名的图与随机抽图共用同一份（含文件存在性判定）。
     const pool = readMemePool(found.conf.memes, memeDirsFor(found.entry));
@@ -267,12 +345,18 @@ export function createChatMemory(deps: ChatMemoryInput) {
             '（模型不支持读图时内核会以占位文本代替）',
         );
       }
+      // 第三方记忆：对话前修改内容；失败或超时降级为原内容（见 recallPatch）。
+      const patch = await recallPatch(petId, {
+        system,
+        history: list.map(({ role, content, ts }) => ({ role, content, ts })),
+        userText: text,
+      });
       // 模型：条目配置的 chatModel 优先（留空 = 不指定）；生成侧失败会回落到当前对话的模型重试一次
       const generated = await generateChat({
         ctx,
-        system,
-        history: list,
-        userText: text,
+        system: patch?.system ?? system,
+        history: patch?.history ?? list,
+        userText: patch?.userText ?? text,
         pool,
         actions,
         preferred: configuredModel(found.conf, 'chatModel'),
@@ -280,18 +364,27 @@ export function createChatMemory(deps: ChatMemoryInput) {
       });
       if (!generated.ok) return generated;
       const now = Date.now();
-      // 图信息只存不送：记忆要能还原「这一轮带过图、配过哪张」（聊天记录存档），
-      // 但历史回放一律只带正文——否则每轮都会把旧图重发一遍给模型。
+      // 用户上传的图只存不送：记忆要能还原「这一轮带过图」（聊天记录存档），但不把图本体重发给模型；
+      // AI 配的图只回填名称标记（见 chat.ts 的 historyMarkersOf），同样不带图本体。
       entry.messages.push({ role: 'user', content: text, ts: now, ...(image ? { image } : {}) });
       entry.messages.push({
         role: 'assistant',
         content: generated.text,
         ts: now,
         ...(generated.image ? { meme: generated.image } : {}),
-        // 动作名与配图名同类：只存不送——历史回放只带正文，否则每轮都会把动作标记重发一遍
+        // 动作名与配图名同类：落盘只存名字，回放历史时由 chat.ts 以 [动作:名] 回填——
+        // 否则模型记不得自己演过什么，用户说「换一个」它无从判断
         ...(generated.action ? { action: generated.action } : {}),
       });
       await writeMemory(mem);
+      // 第三方记忆：落盘后异步接收；不等待、失败只记日志，不能影响这一轮回复。
+      captureTurn(petId, {
+        userText: text,
+        replyText: generated.text,
+        ts: now,
+        ...(generated.action !== undefined ? { action: generated.action } : {}),
+        ...(generated.image !== undefined ? { image: generated.image } : {}),
+      });
       // 动作先写：与 POST /anim 同一条写回链路（记录 + anim 叶子），渲染端据此播放并回报执。
       if (generated.action !== undefined) {
         const record = playback.create(petId, generated.action);
@@ -299,7 +392,8 @@ export function createChatMemory(deps: ChatMemoryInput) {
       }
       // 回复写进 S（与碎碎念同一个叶子：前端本来就是同一条展示链路）。
       // 该由哪一端念按这只宠物的 display 推：对话请求带的是 surface=any，本来就没有具体的一端可用。
-      const replyVoiceTo = voiceTargetFor(found.pet);
+      // 对话回复归「手动播报」：用户发了消息才有的这一句，由 voiceEnabled 决定念不念。
+      const replyVoiceTo = cfg.main?.voiceEnabled === true ? voiceTargetFor(found.pet) : undefined;
       // 只有动作没有正文（模型只写了标记）→ 不写 say，避免弹一个空气泡。
       if (generated.text !== '') {
         state.writePet(petId, 'say', {

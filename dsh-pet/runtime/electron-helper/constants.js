@@ -15,6 +15,9 @@ const CONFIG = {
   scale: Number(params.get('scale') || '1'),
   petIndex: Number(params.get('petIndex') || '0'),
   topInsetRatio: Number(params.get('topInsetRatio') || '0'),
+  // 窗口是否被系统钳在工作区内：X11 的窗口管理器如此（Windows / macOS 允许窗口探出屏幕），
+  // 由主进程按平台注入。开启时窗口探不出屏幕，本体靠窗口内偏移贴边（见 fitWindow）。
+  isWindowClampedToWorkArea: params.get('isWindowClampedToWorkArea') === '1',
 };
 
 // 坐标系约定：主进程对窗口 setZoomFactor(CONFIG.scale) 后，DOM 度量、事件坐标、桌面几何与全部
@@ -135,6 +138,7 @@ const ORIGIN = new URL(CONFIG.configUrl).origin;
 const BASE = BRIDGE ? 'dsh-pet-bridge://dsh-pet/dsh-pet-7340' : ORIGIN + '/dsh-pet-7340';
 const STATE_URL = BASE + '/state'; // 轮询统一状态 S：前端 1s 轮询的唯一数据源（余额/工作状态/通知/说话）
 const BALANCE_URL = BASE + '/balance'; // 余额刷新动作（POST，写 S；数据本身从 /state 读）
+const FOCUS_SESSION_URL = BASE + '/focus-session'; // 跳会话动作（POST，写 sections.focusSession；页面据此切过去）
 const WHISPER_URL = BASE + '/whisper';
 // 实况上报（渲染端 → 宿主，内部通道）：第三方用 GET /pose 读宿主存下的这份快照
 const POSE_REPORT_URL = BASE + '/pose/report';

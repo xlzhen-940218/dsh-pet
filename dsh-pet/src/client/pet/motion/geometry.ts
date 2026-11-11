@@ -5,7 +5,7 @@
  * 换算本身不夹取；越界摆放的可见下限由 {@link clampReachableBox} 在提交位置时保证。
  * @module dsh-pet/src/client/pet/motion/geometry
  */
-import { CANVAS_H, FEET_Y, HIT_BOX } from '../../../shared/constants.ts';
+import { CANVAS_H, FEET_Y, HIT_BOX, MIN_REACHABLE_PX } from '../../../shared/constants.ts';
 import { bodyPixelBox } from '../../../shared/physics.ts';
 import type { CSSProperties } from 'react';
 
@@ -84,9 +84,6 @@ export function boxToRatio(box: BoxPoint, viewport: Viewport, half: HalfSize): C
   return { rx: (box.x + half.w) / viewport.width, ry: (box.y + half.h) / viewport.height };
 }
 
-/** 越界摆放的可见下限（px）：命中区留在视口内至少这么多，右键才点得到。 */
-export const MIN_REACHABLE_PX = 24;
-
 /**
  * 把越界摆放的盒子收到「命中区至少还可见 {@link MIN_REACHABLE_PX}」。
  *
@@ -128,9 +125,14 @@ function clampAxis(value: number, lo: number, hi: number, centered: number): num
   return lo > hi ? centered : Math.min(Math.max(value, lo), hi);
 }
 
-/** 舞台内联样式：拖拽中取消脚垫位移，让视频贴着指针走。 */
-export function petStageStyle(dragging: boolean, bottomPad: number): CSSProperties {
-  return dragging ? { transform: 'none' } : { transform: 'translateY(' + bottomPad + 'px)' };
+/**
+ * 舞台内联样式：脚底垫高恒定生效，拖拽中也不取消。
+ *
+ * 拖拽的抓取偏移按根节点包围盒量（不含这段位移），一旦取消，视频会相对光标
+ * 整体上跳 bottomPad、松手再落回；位移恒定，抓取点才始终落在光标下。
+ */
+export function petStageStyle(bottomPad: number): CSSProperties {
+  return { transform: 'translateY(' + bottomPad + 'px)' };
 }
 
 /**

@@ -95,6 +95,8 @@ Object.assign(PetSprite.prototype, {
     this.workTimer = null;
     this.workText = null;
     this.workState = null; // 最近一次工作状态（互动/事件动画播完恢复档位循环用）
+    this.workSessionId = null; // 当前展示条目所属会话：有值才让工作气泡可点（点了跳过去）
+    this.bubbleSlot = 'none'; // 当前显示的气泡槽位（renderBubble 写）：点击处理据此分清翻页与跳会话
     this.prevWorkState = null; // 上一档状态（气泡只在状态变化时点亮/收起）
     this.prevWorkTick = 0;
     // 占用锁：frozen = 此刻正被第三方占用；lockTimer 按叶子里的 expiresAt 自己到点解除
@@ -128,11 +130,12 @@ Object.assign(PetSprite.prototype, {
 
   /** 建 DOM 并把首帧位置落到窗口；布局数值全部来自上面算好的 geometry。 */
   buildDom() {
-    // DOM：sprite 钉在窗口内 (margin.l, margin.t)；宠物"位置"= sprite 位置，窗口随余量外扩
+    // DOM：sprite 摆在窗口内 (winOffset.x, winOffset.y)；宠物"位置"= sprite 位置，窗口随余量外扩。
+    // 初值等于余量，窗口被系统钳回工作区后由 fitWindow 逐帧改成更大的偏移。
     this.el = document.createElement('div');
     this.el.className = 'pet-sprite';
-    this.el.style.left = this.margin.l + 'px';
-    this.el.style.top = this.margin.t + 'px';
+    this.el.style.left = this.winOffset.x + 'px';
+    this.el.style.top = this.winOffset.y + 'px';
     this.el.style.setProperty('--pet-size', this.size + 'px');
     // 字号（配置 font）：按本宠物尺寸算好最终 px 注入，气泡与提示的 CSS 读这两个变量
     const fontPx = S.resolveFontPx(this.font, this.size);
@@ -140,8 +143,8 @@ Object.assign(PetSprite.prototype, {
     this.el.style.setProperty('--dsh-pet-font-tip', fontPx.tip + 'px');
     const stage = document.createElement('div');
     stage.className = 'pet-stage';
+    // 位移恒定：拖拽中也不取消，否则视频会相对光标上跳、抓取点全程偏移 bottomPad。
     stage.style.transform = 'translateY(' + this.bottomPad + 'px)';
-    this.stage = stage;
     this.videoA = document.createElement('video');
     this.videoA.className = 'pet-video is-front';
     this.videoB = document.createElement('video');
@@ -161,8 +164,14 @@ Object.assign(PetSprite.prototype, {
     this.hit.setAttribute('aria-label', this.pet.name);
     this.bubble = document.createElement('div');
     this.bubble.className = 'pet-bubble';
-    // 余额气泡可点时点一下切页：就地吞掉事件，别让这次点击落到下面的本体命中层。
+    // 气泡点击按当前槽位分流：工作气泡跳会话，余额气泡切页。都就地吞掉事件，别落到下面的本体命中层。
     this.bubble.addEventListener('click', (e) => {
+      if (this.workClickable()) {
+        e.stopPropagation();
+        e.preventDefault();
+        this.openWorkSession();
+        return;
+      }
       if (!this.balanceClickable()) return;
       e.stopPropagation();
       e.preventDefault();
@@ -248,6 +257,12 @@ Object.assign(PetSprite.prototype, {
       { signal: ac.signal },
     );
 
+    // 主进程兜底：宠物自己走开、或窗口被别的窗口接走时页面收不到 mousemove，提示会一直亮着；
+    // 主进程按光标轮询判定「刚离开身体」后通知这里收起（setTip 幂等，与 mousemove 判定不冲突）。
+    if (window.petBridge && typeof window.petBridge.onPointerLeft === 'function') {
+      window.petBridge.onPointerLeft(() => this.setTip(false));
+    }
+
     this.subscribeCollision();
   },
 
@@ -259,7 +274,6 @@ Object.assign(PetSprite.prototype, {
     this.others = {}; // petId -> {x,y,vx,vy,size,bottomPad}（其它宠物的最新状态，来自主进程广播）
     this.throwState = null; // 飞行中的实时状态（被撞查询 / 其它窗碰撞检测时上报用）
     this.pressScoreFired = false; // 按下瞬间已触发过积分（pointerdown 即触发；click 据此不重复弹，同浏览器）
-    this.lastFlightReport = 0;
     if (window.petBridge && window.petBridge.onFlightStates) {
       window.petBridge.onFlightStates((states) => {
         if (!states || typeof states !== 'object') return;
