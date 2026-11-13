@@ -3,14 +3,31 @@
  *
  * PetSprite 由 sprite.js 定义，本文件只往原型上挂方法，必须在其后加载。
  * 副作用是 DOM 事件与 IPC（setInteractive / syncInputBusy），不碰播放与运动状态机。
+ * 鼠标与触摸共用这一套指针状态机；拖拽增量按工作区坐标算，不读 e.screenX（触摸 pointer 事件给的是页面坐标）。
  * @module dsh-pet/runtime/electron-helper/sprite-input
  */
 'use strict';
 
 Object.assign(PetSprite.prototype, {
+  /**
+   * 指针位置（工作区坐标系，CSS 像素）：与本体位置同一套坐标系。
+   *
+   * 不读 e.screenX：浏览器给触摸派生的 pointer 事件报的是页面坐标而不是屏幕坐标，
+   * 按它算增量会退化成「指针相对窗口的位移」——窗口正跟着手指走，这个位移恒为零，宠物就不跟手。
+   * 窗口原点由本体位置反推（窗口原点 + 偏移 = 本体位置，见 fitWindowInArea），拼上 clientX 即工作区位置。
+   */
+  pointerPos(e) {
+    return {
+      x: e.clientX + this.pos.x - this.winOffset.x,
+      y: e.clientY + this.pos.y - this.winOffset.y,
+    };
+  },
+
   onPointerDown(e) {
     // 只认左键：右键进入拖拽判定会与右键菜单打架
     if (e.button !== 0) return;
+    // 只认主指针：第二根手指会另起一套按压状态，与第一根互相踩
+    if (e.isPrimary === false) return;
     // 占用锁：用户点了或拖了这只宠物 = 用户接管，立刻撤掉第三方占用。这是唯一一处「渲染端 → 宿主」
     // 的锁上报——宿主看不见鼠标，而锁在它手里（/lock/release 的 force 形态）。
     // 先本地解冻再上报：等叶子往返会让宠物「点了半天才动」，而此刻 frozen 为真说明这次释放必然成功。
@@ -86,13 +103,14 @@ Object.assign(PetSprite.prototype, {
     } catch {
       /* 忽略捕获失败 */
     }
-    // 记录按下时的指针屏幕坐标与宠物窗口位置：增量全部用 screenX/Y 算——屏幕坐标与窗口位置无关，
-    // 不受窗口逐帧移动影响（window.screenX 会滞后/缓存）；物理像素 ÷scale 进 CSS 系。
+    // 记录按下时的指针位置与本体位置：增量一律按工作区坐标算（见 pointerPos），
+    // 指针位置由 clientX 加窗口原点反推，不受「远程桌面不驱动系统指针」影响。
     this.dragState = {
       active: true,
       dragging: false,
-      sx: toLocal(e.screenX),
-      sy: toLocal(e.screenY),
+      pointerType: e.pointerType || 'mouse',
+      sx: this.pointerPos(e).x,
+      sy: this.pointerPos(e).y,
       petX: this.pos.x,
       petY: this.pos.y,
     };
@@ -104,14 +122,19 @@ Object.assign(PetSprite.prototype, {
     this.dragState.sling = sling;
     this.dragState.anchorX = this.pos.x + this.halfW;
     this.dragState.anchorY = this.pos.y + this.halfH;
+    // 触屏长按：到点把这次按压当右键（触屏没有右键键，菜单就没有入口）
+    this.armTouchPress(e);
   },
 
   onPointerMove(e) {
     const d = this.dragState;
     if (!d.active) return;
-    // 阈值判定用屏幕坐标增量（clientX 会随窗口移动变化，屏幕坐标稳定）；÷scale 进 CSS 系
-    const dx = toLocal(e.screenX) - d.sx;
-    const dy = toLocal(e.screenY) - d.sy;
+    // 阈值判定与轨迹采样都用工作区坐标下的指针位置（见 pointerPos）
+    const p = this.pointerPos(e);
+    const dx = p.x - d.sx;
+    const dy = p.y - d.sy;
+    // 长按窗口内手指移动超过容差即取消
+    this.touchPressMove(Math.hypot(dx, dy));
     if (!d.dragging) {
       if (Math.hypot(dx, dy) < S.DRAG_THRESHOLD) return;
       d.dragging = true;
@@ -121,11 +144,11 @@ Object.assign(PetSprite.prototype, {
       }
       this.syncInputBusy(); // 拖拽成立：主进程兜底通道闭嘴（见 inputBusy）
     }
-    // 记录指针轨迹（screenX/Y 采样，速度一致；初速估算用；÷scale 进 CSS 系）
+    // 记录指针轨迹（工作区坐标采样，速度一致；初速估算用）
     const now = performance.now();
-    this.dragTrail.push({ t: now, x: toLocal(e.screenX), y: toLocal(e.screenY) });
+    this.dragTrail.push({ t: now, x: p.x, y: p.y });
     this.dragTrail = S.trimTrail(this.dragTrail, now);
-    // 弹簧目标 = 按下时的宠物位置 + 指针屏幕增量（窗口怎么动都不影响坐标），由 rAF 逐帧追赶
+    // 弹簧目标 = 按下时的宠物位置 + 指针位移（窗口怎么动都不影响坐标），由 rAF 逐帧追赶
     this.dragTarget = { x: d.petX + dx, y: d.petY + dy };
     this.startDragFollow();
   },
@@ -137,11 +160,13 @@ Object.assign(PetSprite.prototype, {
     d.dragging = false;
     this.hit.classList.remove('dragging');
     this.stopDragFollow(); // 弹簧跟随立即停（位置定格在实时 this.pos）
+    this.cancelTouchPress(); // 长按计时随松手撤销
     this.syncInputBusy(); // 拖拽结束：交还给常规判定（幂等，非拖拽时多调一次不发 IPC）
     // 提示复位：点击/拖拽期间收起，指针仍在命中区内就恢复。用 hitRect 而不是 getBoundingClientRect
     // ——命中区是窗口坐标里的权威几何，与 onMouseMove 同源。必须留在 syncInputBusy() 之后：
     // 源码守卫只扫本函数开头 400 字符找上报调用，插到前面会把上报挤出窗口。
-    if (e && Number.isFinite(e.clientX)) {
+    // 触摸不恢复：没有悬停这回事，系统指针又不动，恢复后提示会一直挂在屏幕上。
+    if (e && e.pointerType !== 'touch' && Number.isFinite(e.clientX)) {
       const r = this.hitRect;
       const px = e.clientX - this.winOffset.x;
       const py = e.clientY - this.winOffset.y;
@@ -157,15 +182,16 @@ Object.assign(PetSprite.prototype, {
       setTimeout(() => {
         this.justDragged = false;
       }, 100);
-      if (e && Number.isFinite(e.screenX)) {
-        // 原始输入留痕（实机排查用：验证指针屏幕坐标与窗口位移是否一致，如 DPI 缩放问题）
+      if (e && Number.isFinite(e.clientX)) {
+        // 原始输入留痕（实机排查用：验证指针位置与窗口位移是否一致，如 DPI 缩放问题）
+        const up = this.pointerPos(e);
         window.__dshPetDebug.lastDragRaw = {
           petX: d.petX,
           petY: d.petY,
           sxDown: d.sx,
           syDown: d.sy,
-          xUp: e.screenX,
-          yUp: e.screenY,
+          xUp: up.x,
+          yUp: up.y,
         };
       }
       // 拖拽松手：非终态工作状态恢复档位循环，否则回 idle。必须用 playOnce：switchTo(idle,false)
@@ -327,7 +353,9 @@ Object.assign(PetSprite.prototype, {
   onMouseMove(e) {
     // 拖拽态下所有按键已松开：说明 pointerup/pointercancel/lostpointercapture 全丢了，
     // 就地按松手收尾，否则 dragState.active 与 inputBusy 永久为 true（穿透永不恢复）。
-    if (this.dragState.active && e.buttons === 0) {
+    // 只认鼠标：触摸时浏览器补发的兼容 mousemove 的 buttons 恒为 0，
+    // 照这条收尾会把刚起步的触摸拖拽当成松手杀掉。
+    if (this.dragState.active && this.dragState.pointerType === 'mouse' && e.buttons === 0) {
       this.onPointerUp(e);
       return;
     }

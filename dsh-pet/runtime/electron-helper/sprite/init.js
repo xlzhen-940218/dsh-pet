@@ -30,7 +30,9 @@ Object.assign(PetSprite.prototype, {
   /** 拖拽 / 抛掷 / 移动 / 挤压的帧句柄与状态；stop 之前这些只有一份。 */
   initMotion() {
     // 交互/移动
-    this.dragState = { active: false, dragging: false, sx: 0, sy: 0, petX: 0, petY: 0 };
+    this.dragState = { active: false, dragging: false, pointerType: 'mouse', sx: 0, sy: 0, petX: 0, petY: 0 };
+    // 触屏长按计时器；null = 没有在等（见 sprite/touch-press.js）
+    this.touchPressTimer = null;
     this.justDragged = false;
     // 上一次按下的时刻（0 = 还没记过）：弹弓的判定依据是两次按下之间隔了多久，与松手时间无关。
     this.lastPressAt = 0;

@@ -46,6 +46,8 @@ const browserGlobals = {
   FileReader: 'readonly',
   btoa: 'readonly',
   CustomEvent: 'readonly',
+  // 触屏长按：sprite/touch-press.js 合成右键事件派给现成的自绘菜单
+  MouseEvent: 'readonly',
   performance: 'readonly',
   fetch: 'readonly',
   Response: 'readonly',
